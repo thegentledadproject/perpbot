@@ -49,3 +49,21 @@ def test_signal_stub_is_not_validated_and_raises():
     assert base.SIGNAL_VALIDATED is False
     with pytest.raises(NotImplementedError):
         base.generate_signal(market_state=None)
+
+
+def test_defaults_read_module_flag_and_are_blocked():
+    d = live_orders_allowed(
+        1, modes={1: ExecutionMode.AUTO}, env={"POLYMARKET_LIVE_TRADING": "true"}
+    )
+    assert d.allowed is False
+    assert "SIGNAL_VALIDATED" in d.reason
+
+
+def test_defaults_pass_when_flag_monkeypatched(monkeypatch):
+    import polyperps.signal.base
+
+    monkeypatch.setattr(polyperps.signal.base, "SIGNAL_VALIDATED", True)
+    d = live_orders_allowed(
+        1, modes={1: ExecutionMode.AUTO}, env={"POLYMARKET_LIVE_TRADING": "true"}
+    )
+    assert d.allowed is True
