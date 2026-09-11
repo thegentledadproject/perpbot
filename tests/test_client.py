@@ -4,12 +4,16 @@ from types import SimpleNamespace
 
 import pytest
 
+from polymarket.errors import RateLimitError
+
 from polyperps.exchange.client import (
+    TRANSIENT_ERRORS,
     PolymarketPerpsClient,
     book_from_rest,
     candle_from_rest,
     funding_from_rest,
     instrument_from_rest,
+    retry_after_seconds,
     tick_from_event,
     tick_from_rest,
 )
@@ -246,3 +250,15 @@ async def test_close_closes_sdk(client):
 def test_no_trading_methods_exist_in_phase0():
     for name in ("place_order", "cancel_order", "update_leverage", "withdraw"):
         assert not hasattr(PolymarketPerpsClient, name)
+
+
+def test_retry_after_seconds_reads_rate_limit_error():
+    assert retry_after_seconds(RateLimitError("x", retry_after=7)) == 7.0
+
+
+def test_retry_after_seconds_none_for_unrelated_error():
+    assert retry_after_seconds(RuntimeError()) is None
+
+
+def test_rate_limit_error_is_transient():
+    assert RateLimitError in TRANSIENT_ERRORS

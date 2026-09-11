@@ -13,6 +13,11 @@ Perps APIs are marked experimental - re-verify on every version bump):
   AsyncPublicClient.fetch_perps_instruments / fetch_perps_ticker /
   fetch_perps_book / list_perps_funding_history / list_perps_candles /
   subscribe(PerpsTickersSpec)
+  errors.RateLimitError / errors.TimeoutError / errors.TransportError -
+  transient failures, exposed to callers as TRANSIENT_ERRORS below so
+  scripts/backfill.py never needs to import `polymarket` itself.
+  RateLimitError.__init__(message, *, retry_after: float | None = None,
+  rate_limit=None) - verified against the installed SDK, 2026-09-11.
 
 list_perps_funding_history / list_perps_candles return an AsyncPaginator;
 `async for page in paginator` (polymarket.pagination.AsyncPaginator._iter_pages)
@@ -28,6 +33,8 @@ from collections.abc import AsyncIterator, Callable, Sequence
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
+from polymarket.errors import RateLimitError, TimeoutError as SdkTimeoutError, TransportError
+
 from polyperps.exchange.rate_limiter import TokenBucket
 from polyperps.exchange.types import (
     BookLevel,
@@ -38,6 +45,18 @@ from polyperps.exchange.types import (
     SourceType,
     Tick,
 )
+
+# Errors worth retrying with a cooldown (rate limit, timeout, transport-level
+# failure). Anything else (bad request, auth failure, ...) is deterministic
+# and retrying it just burns time and API budget - callers should let those
+# propagate.
+TRANSIENT_ERRORS: tuple[type[BaseException], ...] = (RateLimitError, SdkTimeoutError, TransportError)
+
+
+def retry_after_seconds(exc: BaseException) -> float | None:
+    """Server-suggested wait for a rate-limit error, else None."""
+    value = getattr(exc, "retry_after", None)
+    return float(value) if value is not None else None
 
 
 def _utcnow() -> datetime:
