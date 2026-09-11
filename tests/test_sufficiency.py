@@ -1,15 +1,28 @@
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
 
-from polyperps.exchange.types import SourceType
+from polyperps.exchange.types import FundingObservation, SourceType
 from polyperps.signal.sufficiency import (
     BAR,
     NATIVE_SOURCES,
     SufficiencyBar,
+    check_dataset,
     dataset_meets_bar,
     stats_clear_bar,
 )
+from polyperps.storage.db import connect, insert_funding
+
+UTC = timezone.utc
+T0 = datetime(2026, 9, 3, 0, 0, tzinfo=UTC)
+
+
+def _load(conn, hours, st):
+    for i in range(hours):
+        ts = T0 + timedelta(hours=i)
+        insert_funding(conn, FundingObservation(instrument_id=6, funding_rate=Decimal("0.0001"),
+                                                exchange_ts=ts, received_ts=ts, source_type=st))
 
 
 def test_bar_values_are_pinned():
@@ -62,3 +75,33 @@ def test_stats_clear_bar_requires_sharpe_and_ci_excluding_zero():
     assert stats_clear_bar(oos_sharpe=0.9, ci_lo=0.0001, ci_hi=0.001) is False
     assert stats_clear_bar(oos_sharpe=1.5, ci_lo=-0.0001, ci_hi=0.001) is False
     assert stats_clear_bar(oos_sharpe=1.5, ci_lo=-0.002, ci_hi=-0.001) is True  # negative edge also "clears" statistically; sign is the strategy's job
+
+
+def test_check_dataset_reports_shortfall_on_ten_days():
+    conn = connect(":memory:")
+    _load(conn, 10 * 24, SourceType.POLYMARKET_REST)
+    r = check_dataset(conn, 6, SourceType.POLYMARKET_REST, now=T0 + timedelta(days=10))
+    assert r.met is False
+    assert r.funding_periods == 240
+    assert r.days == Decimal("9.96")  # (239 hours) / 24
+    assert set(r.shortfall) == {"days", "funding_periods"}
+
+
+def test_check_dataset_met_on_sixty_one_days_native():
+    conn = connect(":memory:")
+    _load(conn, 61 * 24 + 1, SourceType.POLYMARKET_REST)
+    r = check_dataset(conn, 6, SourceType.POLYMARKET_REST, now=T0 + timedelta(days=62))
+    assert r.met is True
+
+
+def test_check_dataset_ignores_other_sources():
+    conn = connect(":memory:")
+    _load(conn, 61 * 24 + 1, SourceType.PROXY_HYPERLIQUID)
+    r = check_dataset(conn, 6, SourceType.POLYMARKET_REST, now=T0 + timedelta(days=62))
+    assert r.funding_periods == 0 and r.days == Decimal("0")
+
+
+def test_check_dataset_empty():
+    conn = connect(":memory:")
+    r = check_dataset(conn, 6, SourceType.POLYMARKET_REST, now=T0)
+    assert r.met is False and r.funding_periods == 0

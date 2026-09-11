@@ -8,10 +8,13 @@ validation log's next record. Never adjust it to make a result pass.
 
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from polyperps.exchange.types import SourceType
+from polyperps.storage.db import query_funding
 
 NATIVE_SOURCES: tuple[SourceType, ...] = (SourceType.POLYMARKET_WS, SourceType.POLYMARKET_REST)
 
@@ -86,3 +89,22 @@ def stats_clear_bar(*, oos_sharpe: float, ci_lo: float, ci_hi: float, bar: Suffi
     if oos_sharpe < float(bar.min_oos_sharpe):
         return False
     return ci_lo > 0.0 or ci_hi < 0.0
+
+
+_EPOCH = datetime(2000, 1, 1, tzinfo=timezone.utc)
+
+
+def check_dataset(
+    conn: sqlite3.Connection,
+    instrument_id: int,
+    source_type: SourceType,
+    *,
+    now: datetime,
+    bar: SufficiencyBar = BAR,
+) -> SufficiencyReport:
+    rows = query_funding(conn, instrument_id, start=_EPOCH, end=now, source_type=source_type)
+    if not rows:
+        return dataset_meets_bar(days=Decimal("0"), funding_periods=0, source_type=source_type, bar=bar)
+    span = rows[-1].exchange_ts - rows[0].exchange_ts
+    days = (Decimal(span.total_seconds()) / Decimal(86_400)).quantize(Decimal("0.01"))
+    return dataset_meets_bar(days=days, funding_periods=len(rows), source_type=source_type, bar=bar)
