@@ -20,6 +20,9 @@ dev = ["pytest>=8", "pytest-asyncio>=0.24"]
 [tool.setuptools.packages.find]
 include = ["polyperps*"]
 
+[tool.setuptools.package-data]
+polyperps = ["signal/*.jsonl", "signal/*.json"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
