@@ -1,8 +1,10 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
-from polyperps.exchange.types import FundingObservation, SourceType, Tick
-from polyperps.storage.db import connect, insert_funding, insert_tick
+import pytest
+
+from polyperps.exchange.types import Candle, FundingObservation, SourceType, Tick
+from polyperps.storage.db import connect, insert_candle, insert_funding, insert_tick
 from polyperps.storage.gaps import find_gaps
 
 UTC = timezone.utc
@@ -51,3 +53,24 @@ def test_funding_table_supported():
                                                 received_ts=T0, source_type=SourceType.POLYMARKET_REST))
     assert find_gaps(conn, 1, table="funding_rates", max_gap=timedelta(hours=1, minutes=5),
                      start=T0, end=T0 + timedelta(hours=1)) == []
+
+
+def candle(ts, interval="1h"):
+    return Candle(instrument_id=1, interval=interval, open_ts=ts, open=Decimal(1), high=Decimal(1),
+                  low=Decimal(1), close=Decimal(1), volume=Decimal(0), trades=0, received_ts=ts,
+                  source_type=SourceType.POLYMARKET_REST)
+
+
+def test_candles_table_gap_detected():
+    conn = connect(":memory:")
+    for i in (0, 1, 3):
+        insert_candle(conn, candle(T0 + i * timedelta(hours=1)))
+    gaps = find_gaps(conn, 1, table="candles", interval="1h", max_gap=timedelta(minutes=90),
+                     start=T0, end=T0 + 3 * timedelta(hours=1))
+    assert gaps == [(T0 + timedelta(hours=1), T0 + 3 * timedelta(hours=1))]
+
+
+def test_candles_table_requires_interval():
+    conn = connect(":memory:")
+    with pytest.raises(ValueError):
+        find_gaps(conn, 1, table="candles", max_gap=timedelta(hours=1), start=T0, end=T0 + timedelta(hours=1))

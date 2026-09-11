@@ -9,11 +9,16 @@ table can never silently mix provenance.
 SDK note: list_perps_* default to the last 24h; explicit start/end are
 always passed. History is pulled in 24h windows to keep pages small.
 
-A transient failure on one window (e.g. a 429 from the public API) is
-retried a few times with a cooldown rather than aborting the whole run and
-losing the gap report; a window that still fails after _MAX_ATTEMPTS is
-skipped and listed at the end, so the gap report is read with that caveat
-rather than being mistaken for a complete pull.
+Only TRANSIENT_ERRORS (rate limit / timeout / transport failure) are
+retried, with a cooldown - a rate-limit error's server-suggested
+retry_after is honored when present, else _RETRY_SLEEP_S. A window that
+still fails after _MAX_ATTEMPTS is skipped and listed at the end, so the
+gap report is read with that caveat rather than being mistaken for a
+complete pull. Any other exception (bad request, auth failure, ...) is
+deterministic - retrying it would just burn the retry budget on every
+later window too, so it propagates immediately and aborts the run for
+that instrument with a clear message; the client/DB connection are still
+closed via the outer `finally`.
 """
 
 from __future__ import annotations
@@ -24,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 
 from polyperps.config import load_settings
 from polyperps.data_ingest.intervals import parse_interval
-from polyperps.exchange.client import PolymarketPerpsClient
+from polyperps.exchange.client import TRANSIENT_ERRORS, PolymarketPerpsClient, retry_after_seconds
 from polyperps.storage import db
 from polyperps.storage.gaps import find_gaps
 
@@ -45,7 +50,7 @@ async def _fetch_window(
     w_start: datetime,
     w_end: datetime,
 ) -> tuple[int, int]:
-    """Fetch+insert one window's funding and candles, retrying on any failure."""
+    """Fetch+insert one window's funding and candles, retrying transient failures only."""
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         try:
             n_f = sum(
@@ -57,12 +62,17 @@ async def _fetch_window(
                 for c in await client.fetch_candles(iid, interval=interval, start=w_start, end=w_end)
             )
             return n_f, n_c
-        except Exception as exc:
+        except TRANSIENT_ERRORS as exc:
+            if attempt == _MAX_ATTEMPTS:
+                print(f"  window {w_start.isoformat()}..{w_end.isoformat()} "
+                      f"giving up after {_MAX_ATTEMPTS} attempts")
+                break
+            sleep_s = retry_after_seconds(exc) or _RETRY_SLEEP_S
             print(
                 f"  window {w_start.isoformat()}..{w_end.isoformat()} failed "
-                f"({type(exc).__name__}); retry {attempt}/{_MAX_ATTEMPTS} in {_RETRY_SLEEP_S}s"
+                f"({type(exc).__name__}); retry {attempt}/{_MAX_ATTEMPTS} in {sleep_s}s"
             )
-            await asyncio.sleep(_RETRY_SLEEP_S)
+            await asyncio.sleep(sleep_s)
     raise RuntimeError(f"window {w_start.isoformat()}..{w_end.isoformat()} exhausted retries")
 
 
@@ -80,6 +90,7 @@ async def main() -> None:
     )
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=args.days)
+    aborted = False
     try:
         instruments = {i.instrument_id: i for i in await client.fetch_instruments()}
         for iid in settings.instrument_ids:
@@ -98,7 +109,15 @@ async def main() -> None:
                     n_c += wc
                 except RuntimeError:
                     failed_windows.append((w_start, w_end))
+                except Exception as exc:
+                    print(f"aborting: {type(exc).__name__} on {iid} window "
+                          f"{w_start.isoformat()}..{w_end.isoformat()} - not a transient error, "
+                          f"fix and rerun")
+                    aborted = True
+                    break
                 w_start = w_end
+            if aborted:
+                break
             print(f"{iid} {inst.symbol}: +{n_f} funding rows, +{n_c} {args.interval} candles "
                   f"(funding_interval={inst.funding_interval})")
 
@@ -115,6 +134,19 @@ async def main() -> None:
                 else:
                     print("  funding: no gaps")
 
+            # Gap check on candles: allow one missed bar before flagging.
+            candle_interval = parse_interval(args.interval)
+            candle_gaps = find_gaps(
+                conn, iid, table="candles", interval=args.interval,
+                max_gap=2 * candle_interval, start=start, end=end,
+            )
+            if candle_gaps:
+                print(f"  candles gaps ({len(candle_gaps)}):")
+                for a, b in candle_gaps:
+                    print(f"    {a.isoformat()} -> {b.isoformat()}  ({(b - a)})")
+            else:
+                print("  candles: no gaps")
+
             if failed_windows:
                 print(f"  windows NOT backfilled ({len(failed_windows)}):")
                 for a, b in failed_windows:
@@ -122,6 +154,8 @@ async def main() -> None:
     finally:
         await client.close()
         conn.close()
+    if aborted:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
