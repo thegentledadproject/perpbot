@@ -42,6 +42,6 @@ def load_settings(env: Mapping[str, str] = os.environ) -> Settings:
         bounds=bounds,
         book_snapshot_interval_s=float(env.get("POLYPERPS_BOOK_INTERVAL_S", "5")),
         health_log_interval_s=float(env.get("POLYPERPS_HEALTH_LOG_S", "60")),
-        rest_rate_per_sec=float(env.get("POLYPERPS_REST_RATE", "5")),
-        rest_burst=int(env.get("POLYPERPS_REST_BURST", "10")),
+        rest_rate_per_sec=float(env.get("POLYPERPS_REST_RATE", "2")),
+        rest_burst=int(env.get("POLYPERPS_REST_BURST", "4")),
     )

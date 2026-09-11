@@ -72,6 +72,7 @@ def test_load_settings_parses_env(tmp_path):
     assert s.instrument_ids == (7, 9)
     assert s.bounds.max_staleness == timedelta(seconds=2.5)
     assert s.book_snapshot_interval_s == 5.0
+    assert s.rest_rate_per_sec == 2.0 and s.rest_burst == 4
 
 
 def test_load_settings_requires_instruments():
