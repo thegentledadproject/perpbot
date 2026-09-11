@@ -11,7 +11,7 @@ POLYMARKET_REST source_type is how a consumer knows that happened.
 from __future__ import annotations
 
 from dataclasses import dataclass, fields
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 
@@ -27,8 +27,12 @@ class SourceType(StrEnum):
 def _require_aware(obj: object) -> None:
     for f in fields(obj):  # type: ignore[arg-type]
         v = getattr(obj, f.name)
-        if isinstance(v, datetime) and (v.tzinfo is None or v.utcoffset() is None):
+        if not isinstance(v, datetime):
+            continue
+        if v.tzinfo is None or v.utcoffset() is None:
             raise ValueError(f"{type(obj).__name__}.{f.name} must be timezone-aware")
+        if v.utcoffset() != timedelta(0):
+            raise ValueError(f"{type(obj).__name__}.{f.name} must be UTC, got offset {v.utcoffset()}")
 
 
 def _require_source_type(obj: object) -> None:

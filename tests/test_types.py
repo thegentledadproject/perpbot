@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -43,6 +43,11 @@ def test_tick_is_frozen_and_keyword_only():
 def test_naive_datetime_rejected():
     with pytest.raises(ValueError, match="timezone-aware"):
         make_tick(exchange_ts=datetime(2026, 9, 11, 12, 0))
+
+
+def test_non_utc_offset_rejected():
+    with pytest.raises(ValueError, match="UTC"):
+        make_tick(exchange_ts=datetime(2026, 9, 11, 12, 0, tzinfo=timezone(timedelta(hours=5))))
 
 
 def test_source_type_is_required_and_enum():
