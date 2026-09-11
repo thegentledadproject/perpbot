@@ -11,6 +11,13 @@ snapshot per instrument every POLYPERPS_BOOK_INTERVAL_S into
 `book_snapshots`. A health line is logged every POLYPERPS_HEALTH_LOG_S.
 The SDK reconnects the WS internally; if the stream ends anyway, this
 loop restarts it with backoff so a 48h soak survives transient failures.
+
+Before subscribing, run_once() validates every id in
+POLYPERPS_INSTRUMENT_IDS against fetch_instruments() and logs the
+resolved id -> symbol map at INFO; an unknown id logs an error and exits
+via SystemExit(2) rather than silently subscribing to nothing useful for
+48 hours. SystemExit is a BaseException, so main()'s restart loop does
+not treat it as a transient crash to retry.
 """
 
 from __future__ import annotations
@@ -74,6 +81,17 @@ async def run_once(settings) -> None:
     client = PolymarketPerpsClient.create_public(
         rate_per_sec=settings.rest_rate_per_sec, burst=settings.rest_burst
     )
+
+    known = {i.instrument_id: i.symbol for i in await client.fetch_instruments()}
+    unknown = [iid for iid in settings.instrument_ids if iid not in known]
+    if unknown:
+        log.error("unknown instrument id(s) in POLYPERPS_INSTRUMENT_IDS: %s", unknown)
+        await client.close()
+        conn.close()
+        raise SystemExit(2)
+    log.info("resolved instruments: %s",
+              {iid: known[iid] for iid in settings.instrument_ids})
+
     stop = asyncio.Event()
 
     def on_reject(tick, rej):
@@ -115,7 +133,10 @@ async def main() -> None:
         try:
             await run_once(settings)
             log.warning("feed stream ended cleanly; restarting")
-        except (KeyboardInterrupt, asyncio.CancelledError):
+        except (KeyboardInterrupt, asyncio.CancelledError, SystemExit):
+            # SystemExit is a BaseException already (not caught by `except Exception`
+            # below); listed explicitly so an unknown-instrument-id abort from
+            # run_once() is never mistaken for a transient crash and retried.
             raise
         except Exception:
             log.exception("feed crashed; restarting in %.0fs", backoff)
