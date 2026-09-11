@@ -20,6 +20,8 @@ announcement. Record each pass in the log table. This is never "done".
    trigger.
 5. **Personal eligibility** - Your own residency/tax status has not changed
    in a way that alters the above.
+6. **Sufficiency re-check** - run `scripts/sufficiency.py`; record days/periods
+   per instrument. Earliest possible native pass: ~2026-11-02.
 
 ## Log
 

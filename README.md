@@ -64,3 +64,24 @@ before Phase 3.
 
 `polymarket-client==0.10.0`. All perps APIs are marked experimental by the
 SDK; bumping is a deliberate task that re-verifies `exchange/client.py`.
+
+## Phase 1 — signal research
+
+Spec: `docs/superpowers/specs/2026-09-11-polyperps-phase1-design.md`. The
+sufficiency bar is pre-registered in `polyperps/signal/sufficiency.py` (Strict:
+native ≥60 days, ≥1,000 funding periods, 30 % holdout, OOS Sharpe ≥1.0 after
+costs, bootstrap 95 % CI excluding zero). Native data cannot meet it before
+~2026-11-02.
+
+| Step | Command |
+|------|---------|
+| store fees (once, and after any fee change) | `scripts/store_fees.py` |
+| proxy backfill | `scripts/backfill_hyperliquid.py --days 400 --map 6=BTC,7=ETH` |
+| sufficiency re-check (monthly) | `scripts/sufficiency.py` |
+| screen a hypothesis | `scripts/run_backtest.py --hypothesis h1 --instrument 6 --source hyperliquid` |
+| confirm on native (after the bar is met) | `scripts/run_backtest.py --hypothesis h1 --instrument 6 --source native` |
+
+Every run appends to `polyperps/signal/validation_log.jsonl` (committed).
+`SIGNAL_VALIDATED` flips to `True` only when `polyperps/signal/validated.json`
+names a `passed=True` native record **and** carries `approved_by`/`approved_at`
+— a deliberate, reviewed commit by a human. No code path writes that file.
