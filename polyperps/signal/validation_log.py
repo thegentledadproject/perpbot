@@ -17,7 +17,7 @@ LOG_PATH = Path(__file__).with_name("validation_log.jsonl")
 
 
 def make_run_id(ts: datetime, hypothesis: str, instrument_id: int, source_type: SourceType) -> str:
-    return f"{ts:%Y%m%dT%H%M%S}-{hypothesis}-{instrument_id}-{source_type.value}"
+    return f"{ts:%Y%m%dT%H%M%S%f}-{hypothesis}-{instrument_id}-{source_type.value}"
 
 
 def _json_default(o: object) -> str:
@@ -50,9 +50,13 @@ def evaluate_run(
     source_type: SourceType,
     sufficiency: SufficiencyReport,
     holdout_sharpe: float,
-    ci_lo: float,
-    ci_hi: float,
+    ci_lo: float | None,
+    ci_hi: float | None,
 ) -> tuple[bool, bool]:
+    if ci_lo is None or ci_hi is None:
+        # A run without a CI (too few holdout returns for the block bootstrap) can
+        # neither screen nor pass -- there is nothing to judge significance against.
+        return False, False
     screened = stats_clear_bar(oos_sharpe=holdout_sharpe, ci_lo=ci_lo, ci_hi=ci_hi)
     passed = screened and source_type in NATIVE_SOURCES and sufficiency.met
     return screened, passed

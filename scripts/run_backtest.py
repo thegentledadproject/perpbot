@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 
 from polyperps.backtest.bars import Bar, build_bars, load_minute_closes
 from polyperps.backtest.harness import run_backtest
@@ -29,7 +30,7 @@ from polyperps.backtest.stats import (
 from polyperps.config import load_settings
 from polyperps.exchange.types import SourceType
 from polyperps.signal.sufficiency import BAR, check_dataset
-from polyperps.signal.validation_log import append_record, evaluate_run, make_run_id
+from polyperps.signal.validation_log import LOG_PATH, append_record, evaluate_run, make_run_id
 from polyperps.storage import db
 from polyperps.strategies import GRIDS, build_strategy
 
@@ -50,9 +51,13 @@ def _stats(res, *, bootstrap: bool, seed: int) -> dict:
         "final_equity": str(res.equity[-1][1]) if res.equity else "0",
     }
     if bootstrap:
-        lo, hi = block_bootstrap_ci(res.returns, block_len=BAR.block_len, resamples=BAR.resamples,
-                                    ci=float(BAR.bootstrap_ci), seed=seed)
-        out["ci_lo"], out["ci_hi"] = lo, hi
+        try:
+            lo, hi = block_bootstrap_ci(res.returns, block_len=BAR.block_len, resamples=BAR.resamples,
+                                        ci=float(BAR.bootstrap_ci), seed=seed)
+            out["ci_lo"], out["ci_hi"] = lo, hi
+        except ValueError as exc:
+            out["ci_lo"], out["ci_hi"] = None, None
+            out["ci_note"] = str(exc)
     return out
 
 
@@ -63,6 +68,7 @@ def main() -> None:
     ap.add_argument("--source", choices=sorted(_SOURCES), required=True)
     ap.add_argument("--fee-category", default="crypto")
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--log-path", type=Path, default=LOG_PATH)
     args = ap.parse_args()
 
     settings = load_settings()
@@ -133,9 +139,11 @@ def main() -> None:
             "sufficiency": {"met": suff.met, "shortfall": suff.shortfall},
             "screened": screened, "passed": passed,
         }
-        append_record(record)
+        append_record(record, path=args.log_path)
+        ci_lo, ci_hi = hstats["ci_lo"], hstats["ci_hi"]
+        ci_str = f"({ci_lo:.5f},{ci_hi:.5f})" if ci_lo is not None and ci_hi is not None else "(n/a)"
         print(f"{record['run_id']}: params={best_params} holdout_sharpe={hstats['sharpe']:.2f} "
-              f"ci=({hstats['ci_lo']:.5f},{hstats['ci_hi']:.5f}) screened={screened} passed={passed}")
+              f"ci={ci_str} screened={screened} passed={passed}")
         if suff.shortfall:
             print(f"  sufficiency shortfall: {suff.shortfall}")
     finally:

@@ -12,7 +12,7 @@ T0 = datetime(2026, 9, 11, 12, 0, 5, tzinfo=timezone.utc)
 
 
 def test_make_run_id():
-    assert make_run_id(T0, "h1", 6, SourceType.PROXY_HYPERLIQUID) == "20260911T120005-h1-6-proxy_hyperliquid"
+    assert make_run_id(T0, "h1", 6, SourceType.PROXY_HYPERLIQUID) == "20260911T120005000000-h1-6-proxy_hyperliquid"
 
 
 def test_append_and_read_round_trip(tmp_path):
@@ -42,3 +42,10 @@ def test_evaluate_run_native_passes_only_with_sufficiency_and_stats():
     assert evaluate_run(source_type=st, sufficiency=_suff(True, st), holdout_sharpe=1.5, ci_lo=0.001, ci_hi=0.002) == (True, True)
     assert evaluate_run(source_type=st, sufficiency=_suff(False, st), holdout_sharpe=1.5, ci_lo=0.001, ci_hi=0.002) == (True, False)
     assert evaluate_run(source_type=st, sufficiency=_suff(True, st), holdout_sharpe=0.5, ci_lo=0.001, ci_hi=0.002) == (False, False)
+
+
+def test_evaluate_run_no_ci_can_neither_screen_nor_pass():
+    st = SourceType.POLYMARKET_REST
+    assert evaluate_run(source_type=st, sufficiency=_suff(True, st), holdout_sharpe=2.0, ci_lo=None, ci_hi=0.002) == (False, False)
+    assert evaluate_run(source_type=st, sufficiency=_suff(True, st), holdout_sharpe=2.0, ci_lo=0.001, ci_hi=None) == (False, False)
+    assert evaluate_run(source_type=st, sufficiency=_suff(True, st), holdout_sharpe=2.0, ci_lo=None, ci_hi=None) == (False, False)
