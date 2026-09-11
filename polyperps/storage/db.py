@@ -86,6 +86,8 @@ def _parse_ts(s: str) -> datetime:
 
 def connect(path: str | Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path))
+    # WAL: cheaper commits, readers never block the writer (feed + backfill share the file).
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(_SCHEMA)
     return conn
 

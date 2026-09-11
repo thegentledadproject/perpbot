@@ -75,3 +75,9 @@ def test_rejections_counted_by_reason():
     insert_rejection(conn, instrument_id=1, reason="stale", detail="y", at=T0 + timedelta(seconds=1))
     insert_rejection(conn, instrument_id=1, reason="price_jump", detail="z", at=T0)
     assert count_rejections(conn, 1) == {"stale": 2, "price_jump": 1}
+
+
+def test_connect_enables_wal_on_file_db(tmp_path):
+    conn = connect(tmp_path / "x.sqlite3")
+    assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+    conn.close()
