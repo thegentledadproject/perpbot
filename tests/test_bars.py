@@ -74,6 +74,14 @@ def test_build_bars_marks_incomplete_when_candle_or_funding_missing():
     assert bars[1].close is None and bars[1].funding_rate == Decimal("0.0001")
 
 
+def test_last_bar_funding_matched_when_timestamp_is_off_the_hour():
+    conn = connect(":memory:")
+    insert_candle(conn, candle(T0, NATIVE))
+    insert_funding(conn, funding(T0 + H + timedelta(minutes=5), NATIVE))
+    (b,) = build_bars(conn, 6, NATIVE, start=T0, end=T0 + H)
+    assert b.funding_rate == Decimal("0.0001") and b.complete is True
+
+
 def test_build_bars_proxy_uses_constant_spread_and_no_index():
     conn = connect(":memory:")
     insert_candle(conn, candle(T0, PROXY))

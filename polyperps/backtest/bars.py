@@ -69,7 +69,8 @@ def build_bars(
     }
     funding = {
         floor_hour(f.exchange_ts): f.funding_rate
-        for f in query_funding(conn, instrument_id, start=first + HOUR, end=last_open + HOUR,
+        for f in query_funding(conn, instrument_id, start=first + HOUR,
+                               end=last_open + 2 * HOUR - timedelta(microseconds=1),
                                source_type=source_type)
     }
     index_by_hour: dict[datetime, Decimal] = {}
@@ -103,7 +104,7 @@ def build_bars(
                 close=c.close if c else None,
                 index_close=index_by_hour.get(open_ts) if native else None,
                 funding_rate=rate,
-                spread_bps=Decimal(spread),
+                spread_bps=spread,
                 complete=c is not None and rate is not None,
             )
         )
