@@ -103,6 +103,8 @@ All existing tests (83) must stay green throughout.
 ```python
 from decimal import Decimal
 
+import pytest
+
 from polyperps.exchange.types import SourceType
 from polyperps.signal.sufficiency import (
     BAR,
@@ -132,8 +134,6 @@ def test_bar_values_are_pinned():
 
 
 def test_bar_is_frozen():
-    import pytest
-
     with pytest.raises(AttributeError):
         BAR.min_days = 1  # type: ignore[misc]
 
@@ -2091,7 +2091,7 @@ def run_backtest(
     )
     book = _Book(notional)
     latency = timedelta(seconds=latency_s)
-    last_equity: Decimal | None = None
+    last_equity = Decimal(0)  # equity starts at 0, so the first mark's return includes entry costs
 
     def log(ts: datetime, kind: Kind, price: Decimal | None, cash_delta: Decimal, note: str = "") -> None:
         res.ledger.append(LedgerRow(ts=ts, kind=kind, position=book.position, price=price,
@@ -2119,8 +2119,7 @@ def run_backtest(
         nonlocal last_equity
         eq = book.equity(price)
         res.equity.append((ts, eq))
-        if last_equity is not None:
-            res.returns.append((eq - last_equity) / notional)
+        res.returns.append((eq - last_equity) / notional)
         last_equity = eq
         log(ts, "mark", price, Decimal(0))
 
@@ -2284,7 +2283,9 @@ def test_h3_trades_toward_index_and_holds_then_exits():
     s = IndexLag(entry_bps=Decimal("25"), hold_bars=1)
     assert s.warmup == 1
     assert s.target(bars[:2]) == Decimal(1)
-    res = run_backtest(bars, s, minute_closes=minutes(bars), taker_fee_rate=Decimal("0.0005"), warmup=1)
+    # strategies carry position state between calls: use a fresh instance for the harness run
+    res = run_backtest(bars, IndexLag(entry_bps=Decimal("25"), hold_bars=1),
+                       minute_closes=minutes(bars), taker_fee_rate=Decimal("0.0005"), warmup=1)
     positions = [r.position for r in res.ledger if r.kind == "fill"]
     assert positions[:2] == [Decimal(1), Decimal(0)]
 
@@ -2636,9 +2637,13 @@ def make_run_id(ts: datetime, hypothesis: str, instrument_id: int, source_type: 
     return f"{ts:%Y%m%dT%H%M%S}-{hypothesis}-{instrument_id}-{source_type.value}"
 
 
+def _json_default(o: object) -> str:
+    return o.isoformat() if isinstance(o, datetime) else str(o)
+
+
 def append_record(record: dict, *, path: Path = LOG_PATH) -> None:
     with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(record, default=str, sort_keys=True) + "\n")
+        f.write(json.dumps(record, default=_json_default, sort_keys=True) + "\n")
 
 
 def read_records(*, path: Path = LOG_PATH) -> list[dict]:
