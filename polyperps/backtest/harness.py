@@ -48,6 +48,14 @@ class BacktestResult:
     fills_at_hourly_open: int = 0
 
 
+def _sign(x: Decimal) -> int:
+    if x > 0:
+        return 1
+    if x < 0:
+        return -1
+    return 0
+
+
 class _Book:
     """Mutable position state for one run."""
 
@@ -97,16 +105,32 @@ def run_backtest(
         delta = target - book.position
         if delta == 0:
             return
-        if book.position != 0:
-            realised = book.unrealised(price)
+        old_position, old_entry = book.position, book.entry
+        if old_position != 0 and (target == 0 or _sign(target) != _sign(old_position)):
+            # Close or flip: realise the full old leg at the fill price; the new leg (if any)
+            # starts fresh at this fill.
+            realised = old_position * notional * (price / old_entry - 1)
             book.cash += realised
             res.trade_pnls.append(realised)
+            new_entry = price if target != 0 else Decimal(0)
+        elif old_position != 0 and abs(target) < abs(old_position):
+            # Same-direction reduction: realise only the closed portion; the retained leg keeps
+            # its original cost basis.
+            closed = abs(old_position) - abs(target)
+            realised = closed * _sign(old_position) * notional * (price / old_entry - 1)
+            book.cash += realised
+            res.trade_pnls.append(realised)
+            new_entry = old_entry
+        else:
+            # Opening from flat, or a same-direction increase: nothing realised; entry becomes
+            # the size-weighted average of the retained and added notional.
+            new_entry = (abs(old_position) * old_entry + abs(delta) * price) / abs(target)
         notional_delta = abs(delta) * notional
         cost = fill_cost(notional_delta=notional_delta, notional=notional, spread_bps=spread_bps,
                          taker_fee_rate=taker_fee_rate, impact_bps=impact_bps)
         book.cash -= cost
         book.position = target
-        book.entry = price if target != 0 else Decimal(0)
+        book.entry = new_entry
         res.fill_notionals.append(notional_delta)
         res.fills += 1
         log(ts, kind, price, -cost, note)
@@ -128,6 +152,9 @@ def run_backtest(
             log(bar.open_ts, "funding", bar.close, paid)
 
         if not nxt.complete or not bar.complete:
+            # Invariant: a position can only be non-zero here if the previous iteration's
+            # completeness check passed for this same bar, so bar.close is never None when
+            # book.position != 0 — the guard below is defensive, not a live path.
             if book.position != 0 and bar.close is not None:
                 trade_to(Decimal(0), bar.close, bar.spread_bps, bar.open_ts, "gap_flatten")
             mark(nxt.open_ts, nxt.close)
