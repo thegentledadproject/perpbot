@@ -12,7 +12,7 @@ SDK surface used (verified against Polymarket/py-sdk main, 2026-09-10; all
 Perps APIs are marked experimental - re-verify on every version bump):
   AsyncPublicClient.fetch_perps_instruments / fetch_perps_ticker /
   fetch_perps_book / list_perps_funding_history / list_perps_candles /
-  subscribe(PerpsTickersSpec)
+  fetch_perps_fees / subscribe(PerpsTickersSpec)
   errors.RateLimitError / errors.TimeoutError / errors.TransportError -
   transient failures, exposed to callers as TRANSIENT_ERRORS below so
   scripts/backfill.py never needs to import `polymarket` itself.
@@ -40,6 +40,7 @@ from polyperps.exchange.types import (
     BookLevel,
     BookSnapshot,
     Candle,
+    FeeSchedule,
     FundingObservation,
     Instrument,
     SourceType,
@@ -152,6 +153,15 @@ def candle_from_rest(instrument_id: int, interval: str, c: Any, received_ts: dat
     )
 
 
+def fee_from_rest(entry: Any, fetched_at: datetime) -> FeeSchedule:
+    return FeeSchedule(
+        category=str(entry.category),
+        taker_fee_rate=entry.taker_fee_rate,
+        maker_fee_rate=entry.maker_fee_rate,
+        fetched_at=fetched_at,
+    )
+
+
 # --- interface ---------------------------------------------------------------
 
 
@@ -165,6 +175,7 @@ class ExchangeClient(Protocol):
     async def fetch_candles(
         self, instrument_id: int, *, interval: str, start: datetime, end: datetime
     ) -> list[Candle]: ...
+    async def fetch_fees(self) -> tuple[FeeSchedule, ...]: ...
     def stream_ticks(self, instrument_ids: Sequence[int]) -> AsyncIterator[Tick]: ...
     async def close(self) -> None: ...
 
@@ -236,6 +247,12 @@ class PolymarketPerpsClient:
             if not page.has_more:
                 break
         return out
+
+    async def fetch_fees(self) -> tuple[FeeSchedule, ...]:
+        await self._limiter.acquire()
+        raw = await self._sdk.fetch_perps_fees()
+        now = self._clock()
+        return tuple(fee_from_rest(e, now) for e in raw)
 
     async def stream_ticks(self, instrument_ids: Sequence[int]) -> AsyncIterator[Tick]:
         from polymarket.streams import PerpsTickersSpec
