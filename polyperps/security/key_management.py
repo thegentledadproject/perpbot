@@ -65,7 +65,12 @@ def _from_credentials_dir(name: str, env: Mapping[str, str]) -> str | None:
     path = Path(directory) / name
     if not path.is_file():
         return None
-    return path.read_text(encoding="utf-8").strip()
+    value = path.read_text(encoding="utf-8").strip()
+    if not value:
+        raise SecretUnavailable(
+            f"credentials file for {name!r} in {CREDENTIALS_DIR_VAR} exists but is empty"
+        )
+    return value
 
 
 def load_secret(

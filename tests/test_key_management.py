@@ -29,6 +29,15 @@ def test_systemd_credentials_dir_wins(tmp_path):
     assert load_secret("POLYMARKET_PRIVATE_KEY", env=env, keyring_backend=kr) == "0xfromsystemd"
 
 
+def test_empty_credentials_file_is_an_error(tmp_path):
+    (tmp_path / "POLYMARKET_PRIVATE_KEY").write_text("  \n")
+    kr = FakeKeyring()
+    kr.set_password(SERVICE, "POLYMARKET_PRIVATE_KEY", "0xfromkeyring")
+    env = {"CREDENTIALS_DIRECTORY": str(tmp_path)}
+    with pytest.raises(SecretUnavailable, match="empty"):
+        load_secret("POLYMARKET_PRIVATE_KEY", env=env, keyring_backend=kr)
+
+
 def test_keyring_used_when_no_credentials_dir():
     kr = FakeKeyring()
     kr.set_password(SERVICE, "POLYMARKET_PRIVATE_KEY", "0xfromkeyring")
