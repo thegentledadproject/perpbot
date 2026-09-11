@@ -64,5 +64,21 @@ def test_sequence_not_compared_across_sources():
 
 def test_custom_bounds_respected():
     loose = SanityBounds(max_staleness=timedelta(seconds=60), max_abs_funding_rate=Decimal("1"),
-                         max_mark_index_divergence=Decimal("1"), max_jump=Decimal("1"))
+                         max_mark_index_divergence=Decimal("1"), max_jump=Decimal("1"),
+                         max_baseline_age=timedelta(seconds=60))
     assert check_tick(tick(received_ts=T0 + timedelta(seconds=30)), bounds=loose, previous=None) is None
+
+
+def test_price_jump_skipped_when_baseline_stale():
+    prev = tick(sequence=1)
+    nxt = tick(mark_price=Decimal("120"), index_price=Decimal("120"), sequence=2,
+               exchange_ts=T0 + timedelta(seconds=120), received_ts=T0 + timedelta(seconds=120))
+    assert check_tick(nxt, bounds=DEFAULT_BOUNDS, previous=prev) is None
+
+
+def test_out_of_order_still_checked_when_baseline_stale():
+    prev = tick(sequence=5, exchange_ts=T0, received_ts=T0)
+    nxt = tick(mark_price=Decimal("120"), index_price=Decimal("120"), sequence=4,
+               exchange_ts=T0 + timedelta(seconds=120), received_ts=T0 + timedelta(seconds=120))
+    r = check_tick(nxt, bounds=DEFAULT_BOUNDS, previous=prev)
+    assert r is not None and r.reason == "out_of_order"

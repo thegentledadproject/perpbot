@@ -19,6 +19,7 @@ class SanityBounds:
     max_abs_funding_rate: Decimal
     max_mark_index_divergence: Decimal  # fraction of index, e.g. 0.05 = 5%
     max_jump: Decimal  # fraction of previous mark, e.g. 0.10 = 10%
+    max_baseline_age: timedelta  # skip price_jump if previous tick is older than this
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +33,7 @@ DEFAULT_BOUNDS = SanityBounds(
     max_abs_funding_rate=Decimal("0.01"),
     max_mark_index_divergence=Decimal("0.05"),
     max_jump=Decimal("0.10"),
+    max_baseline_age=timedelta(seconds=60),
 )
 
 
@@ -59,8 +61,12 @@ def check_tick(tick: Tick, *, bounds: SanityBounds, previous: Tick | None) -> Re
         )
         if same_stream and tick.sequence <= previous.sequence:
             return Rejection("out_of_order", f"sequence {tick.sequence} <= previous {previous.sequence}")
-        jump = abs(tick.mark_price - previous.mark_price) / previous.mark_price
-        if jump > bounds.max_jump:
-            return Rejection("price_jump", f"{jump:.4f} > {bounds.max_jump} vs previous mark {previous.mark_price}")
+        baseline_age = tick.exchange_ts - previous.exchange_ts
+        if baseline_age <= bounds.max_baseline_age:
+            jump = abs(tick.mark_price - previous.mark_price) / previous.mark_price
+            if jump > bounds.max_jump:
+                return Rejection(
+                    "price_jump", f"{jump:.4f} > {bounds.max_jump} vs previous mark {previous.mark_price}"
+                )
 
     return None

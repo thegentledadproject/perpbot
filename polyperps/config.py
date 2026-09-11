@@ -35,6 +35,9 @@ def load_settings(env: Mapping[str, str] = os.environ) -> Settings:
         max_abs_funding_rate=Decimal(env.get("POLYPERPS_MAX_ABS_FUNDING", str(DEFAULT_BOUNDS.max_abs_funding_rate))),
         max_mark_index_divergence=Decimal(env.get("POLYPERPS_MAX_MARK_INDEX_DIV", str(DEFAULT_BOUNDS.max_mark_index_divergence))),
         max_jump=Decimal(env.get("POLYPERPS_MAX_JUMP", str(DEFAULT_BOUNDS.max_jump))),
+        max_baseline_age=timedelta(
+            seconds=float(env.get("POLYPERPS_MAX_BASELINE_AGE_S", "60"))
+        ),
     )
     return Settings(
         db_path=Path(env.get("POLYPERPS_DB_PATH", "data/polyperps.sqlite3")),
