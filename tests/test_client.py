@@ -84,13 +84,44 @@ def test_funding_and_candle_and_instrument_from_rest():
     assert i.instrument_id == 7 and i.max_leverage == 20
 
 
+class FakePage:
+    """Stand-in for polymarket.pagination.Page: one REST page of results."""
+
+    def __init__(self, items, *, has_more):
+        self.items = tuple(items)
+        self.has_more = has_more
+
+
 class FakePaginator:
-    def __init__(self, items):
-        self._items = items
+    """Stand-in for polymarket.pagination.AsyncPaginator.
+
+    `__aiter__` yields one FakePage per simulated REST page — the client must
+    fetch (acquire a limiter token for) each page individually, mirroring the
+    real AsyncPaginator which issues one HTTP request per page.
+    """
+
+    def __init__(self, pages):
+        self._pages = list(pages)
+
+    def __aiter__(self):
+        return self._iter_pages()
+
+    async def _iter_pages(self):
+        for page in self._pages:
+            yield page
 
     async def iter_items(self):
-        for it in self._items:
-            yield it
+        for page in self._pages:
+            for it in page.items:
+                yield it
+
+
+def make_paginator(*page_items):
+    """Build a FakePaginator from one item-list per page (last page is final)."""
+    pages = [
+        FakePage(items, has_more=(i < len(page_items) - 1)) for i, items in enumerate(page_items)
+    ]
+    return FakePaginator(pages)
 
 
 class FakeHandle:
@@ -135,13 +166,13 @@ class FakeSdk:
 
     def list_perps_funding_history(self, *, instrument_id, start, end):
         self.calls.append(("funding", instrument_id, start, end))
-        return FakePaginator([SimpleNamespace(funding_rate=Decimal("0.0001"), timestamp=T0)])
+        return make_paginator([SimpleNamespace(funding_rate=Decimal("0.0001"), timestamp=T0)])
 
     def list_perps_candles(self, *, instrument_id, interval, start, end):
         self.calls.append(("candles", instrument_id, interval))
-        return FakePaginator([SimpleNamespace(timestamp=T0, open=Decimal("1"), high=Decimal("1"),
-                                              low=Decimal("1"), close=Decimal("1"),
-                                              volume=Decimal("0"), trades=0)])
+        return make_paginator([SimpleNamespace(timestamp=T0, open=Decimal("1"), high=Decimal("1"),
+                                               low=Decimal("1"), close=Decimal("1"),
+                                               volume=Decimal("0"), trades=0)])
 
     async def subscribe(self, specs):
         self.calls.append(("subscribe", [s.instrument_id for s in specs]))
@@ -181,6 +212,21 @@ async def test_rest_calls_go_through_limiter_and_convert(client):
     assert fund[0].source_type is SourceType.POLYMARKET_REST
     assert candles[0].interval == "1m"
     assert bucket.acquired == 5
+
+
+async def test_fetch_funding_history_acquires_one_token_per_page():
+    class TwoPageSdk:
+        def list_perps_funding_history(self, *, instrument_id, start, end):
+            return make_paginator(
+                [SimpleNamespace(funding_rate=Decimal("0.0001"), timestamp=T0)],
+                [SimpleNamespace(funding_rate=Decimal("0.0002"), timestamp=T0)],
+            )
+
+    bucket = CountingBucket()
+    c = PolymarketPerpsClient(TwoPageSdk(), limiter=bucket, clock=lambda: RX)
+    result = await c.fetch_funding_history(7, start=T0 - timedelta(days=1), end=T0)
+    assert [f.funding_rate for f in result] == [Decimal("0.0001"), Decimal("0.0002")]
+    assert bucket.acquired == 2
 
 
 async def test_stream_ticks_filters_to_ticker_events_and_closes(client):

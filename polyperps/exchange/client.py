@@ -13,6 +13,13 @@ Perps APIs are marked experimental - re-verify on every version bump):
   AsyncPublicClient.fetch_perps_instruments / fetch_perps_ticker /
   fetch_perps_book / list_perps_funding_history / list_perps_candles /
   subscribe(PerpsTickersSpec)
+
+list_perps_funding_history / list_perps_candles return an AsyncPaginator;
+`async for page in paginator` (polymarket.pagination.AsyncPaginator._iter_pages)
+issues one REST call per page and yields a Page(items, has_more, ...). We
+iterate pages manually (not paginator.iter_items()) and acquire a limiter
+token before each page fetch, so a multi-page query is paced call-for-call
+rather than hiding N REST calls behind a single token.
 """
 
 from __future__ import annotations
@@ -182,20 +189,34 @@ class PolymarketPerpsClient:
     async def fetch_funding_history(
         self, instrument_id: int, *, start: datetime, end: datetime
     ) -> list[FundingObservation]:
-        await self._limiter.acquire()
         pager = self._sdk.list_perps_funding_history(instrument_id=instrument_id, start=start, end=end)
         now = self._clock()
-        return [funding_from_rest(instrument_id, fr, now) async for fr in pager.iter_items()]
+        out: list[FundingObservation] = []
+        pages = pager.__aiter__()
+        while True:
+            await self._limiter.acquire()  # one token per REST page, not per query
+            page = await pages.__anext__()
+            out.extend(funding_from_rest(instrument_id, fr, now) for fr in page.items)
+            if not page.has_more:
+                break
+        return out
 
     async def fetch_candles(
         self, instrument_id: int, *, interval: str, start: datetime, end: datetime
     ) -> list[Candle]:
-        await self._limiter.acquire()
         pager = self._sdk.list_perps_candles(
             instrument_id=instrument_id, interval=interval, start=start, end=end
         )
         now = self._clock()
-        return [candle_from_rest(instrument_id, interval, c, now) async for c in pager.iter_items()]
+        out: list[Candle] = []
+        pages = pager.__aiter__()
+        while True:
+            await self._limiter.acquire()  # one token per REST page, not per query
+            page = await pages.__anext__()
+            out.extend(candle_from_rest(instrument_id, interval, c, now) for c in page.items)
+            if not page.has_more:
+                break
+        return out
 
     async def stream_ticks(self, instrument_ids: Sequence[int]) -> AsyncIterator[Tick]:
         from polymarket.streams import PerpsTickersSpec
