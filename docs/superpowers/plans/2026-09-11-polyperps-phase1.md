@@ -1822,7 +1822,8 @@ git commit -m "feat(phase1): cost model and statistics with block bootstrap"
 - Produces:
   - `Strategy` Protocol: attributes `name: str`, `params: Mapping[str, Decimal | int]`; method `target(self, history: Sequence[Bar]) -> Decimal`. `clamp_target(x: Decimal) -> Decimal` into `[-1, 1]`.
   - `LedgerRow(ts: datetime, kind: Literal["funding","fill","fill_unavailable","gap_flatten","mark"], position: Decimal, price: Decimal | None, cash_delta: Decimal, equity: Decimal, note: str = "")` frozen.
-  - `BacktestResult(ledger: list[LedgerRow], equity: list[tuple[datetime, Decimal]], returns: list[Decimal], trade_pnls: list[Decimal], fill_notionals: list[Decimal], params: dict[str, str], bars_total: int, bars_complete: int, fills: int, fills_unavailable: int)`.
+  - `BacktestResult(ledger: list[LedgerRow], equity: list[tuple[datetime, Decimal]], returns: list[Decimal], trade_pnls: list[Decimal], fill_notionals: list[Decimal], params: dict[str, str], bars_total: int, bars_complete: int, fills: int, fills_unavailable: int, fills_at_hourly_open: int)`.
+  - **Spec amendment (Task 5 finding):** when no minute candle exists at `open_ts + latency`, fill at `bars[t+1].open`, tag the ledger row `note="fill_source=hourly_open"`, and increment `fills_at_hourly_open`. `fill_unavailable` only when `bars[t+1].open` is also `None`.
   - `run_backtest(bars: Sequence[Bar], strategy: Strategy, *, minute_closes: Mapping[datetime, Decimal], taker_fee_rate: Decimal, warmup: int, latency_s: int = BAR.latency_s, impact_bps: Decimal = BAR.impact_bps, notional: Decimal = BAR.notional_usd) -> BacktestResult`.
   - Semantics exactly as spec §5.2; `returns[i] = (equity[i] − equity[i−1]) / notional`; `trade_pnls` = realised PnL each time a non-zero position is reduced/closed/flipped (per fill).
 
@@ -1926,11 +1927,20 @@ def test_fill_uses_minute_close_after_latency():
     assert fill.price == Decimal("101")
 
 
-def test_missing_minute_candle_refuses_fill():
-    bars = [bar(0), bar(1), bar(2)]
+def test_missing_minute_candle_falls_back_to_hourly_open_and_counts_it():
+    bars = [bar(0), bar(1, close="103"), bar(2)]
     res = run_backtest(bars, Const(1), minute_closes={}, taker_fee_rate=FEE, warmup=0)
-    assert res.fills == 0 and res.fills_unavailable == 2
-    assert all(r.position == 0 for r in res.ledger)
+    (fill,) = [r for r in res.ledger if r.kind == "fill"]
+    assert fill.price == Decimal("103") and fill.note == "fill_source=hourly_open"
+    assert res.fills == 1 and res.fills_at_hourly_open == 1 and res.fills_unavailable == 0
+
+
+def test_minute_candle_preferred_over_hourly_open():
+    bars = [bar(0), bar(1, close="103")]
+    mc = {T0 + H: Decimal("101")}
+    res = run_backtest(bars, Const(1), minute_closes=mc, taker_fee_rate=FEE, warmup=0)
+    (fill,) = [r for r in res.ledger if r.kind == "fill"]
+    assert fill.price == Decimal("101") and fill.note == "" and res.fills_at_hourly_open == 0
 
 
 def test_gap_forces_flatten_and_blocks_reentry_until_complete():
@@ -2051,6 +2061,7 @@ class BacktestResult:
     bars_complete: int = 0
     fills: int = 0
     fills_unavailable: int = 0
+    fills_at_hourly_open: int = 0
 
 
 class _Book:
@@ -2097,7 +2108,8 @@ def run_backtest(
         res.ledger.append(LedgerRow(ts=ts, kind=kind, position=book.position, price=price,
                                     cash_delta=cash_delta, equity=book.equity(price), note=note))
 
-    def trade_to(target: Decimal, price: Decimal, spread_bps: Decimal, ts: datetime, kind: Kind) -> None:
+    def trade_to(target: Decimal, price: Decimal, spread_bps: Decimal, ts: datetime, kind: Kind,
+                 note: str = "") -> None:
         delta = target - book.position
         if delta == 0:
             return
@@ -2113,7 +2125,7 @@ def run_backtest(
         book.entry = price if target != 0 else Decimal(0)
         res.fill_notionals.append(notional_delta)
         res.fills += 1
-        log(ts, kind, price, -cost)
+        log(ts, kind, price, -cost, note)
 
     def mark(ts: datetime, price: Decimal | None) -> None:
         nonlocal last_equity
@@ -2141,11 +2153,17 @@ def run_backtest(
         if target != book.position:
             fill_ts = nxt.open_ts + latency
             price = minute_closes.get(floor_minute(fill_ts))
-            if price is None:
-                res.fills_unavailable += 1
-                log(nxt.open_ts, "fill_unavailable", None, Decimal(0), f"no 1m candle at {fill_ts.isoformat()}")
-            else:
+            if price is not None:
                 trade_to(target, price, bar.spread_bps, nxt.open_ts, "fill")
+            elif nxt.open is not None:
+                # Spec amendment (Task 5): proxy 1m candles exist for ~3.5 days only.
+                # Fall back to the hourly open and COUNT it so records show the reliance.
+                res.fills_at_hourly_open += 1
+                trade_to(target, nxt.open, bar.spread_bps, nxt.open_ts, "fill",
+                         note="fill_source=hourly_open")
+            else:
+                res.fills_unavailable += 1
+                log(nxt.open_ts, "fill_unavailable", None, Decimal(0), f"no price at {fill_ts.isoformat()}")
 
         mark(nxt.open_ts, nxt.close)
 
@@ -2155,7 +2173,7 @@ def run_backtest(
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `.venv/Scripts/python -m pytest tests/test_harness.py -v`
-Expected: 9 passed. If `test_equity_and_returns_track_price` is off by the spread cost, recheck: entry fill at 100 with `spread_bps=10` costs `100 × 10/20000 = 0.05`; final equity `10 − 0.05 = 9.95`.
+Expected: 10 passed. If `test_equity_and_returns_track_price` is off by the spread cost, recheck: entry fill at 100 with `spread_bps=10` costs `100 × 10/20000 = 0.05`; final equity `10 − 0.05 = 9.95`.
 
 - [ ] **Step 6: Commit**
 
@@ -2735,6 +2753,7 @@ def _stats(res, *, bootstrap: bool, seed: int) -> dict:
         "n": len(res.returns),
         "fills": res.fills,
         "fills_unavailable": res.fills_unavailable,
+        "fills_at_hourly_open": res.fills_at_hourly_open,
         "final_equity": str(res.equity[-1][1]) if res.equity else "0",
     }
     if bootstrap:
@@ -3039,7 +3058,7 @@ Append a row to the checklist's "Checks" list in `docs/ops/eligibility-checklist
 - [ ] **Step 6: Full suite**
 
 Run: `.venv/Scripts/python -m pytest -q`
-Expected: 83 existing + 7+4+5+2+7+7+12+9+9+4+9 = 158 passed, no warnings. If the number differs, report what pytest prints; pass/fail is what matters.
+Expected: 83 existing + 7+4+5+2+7+7+12+10+9+4+9 = 159 passed, no warnings. If the number differs, report what pytest prints; pass/fail is what matters.
 
 - [ ] **Step 7: Commit**
 

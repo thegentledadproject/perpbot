@@ -105,7 +105,7 @@ For each bar index `t` from `warmup` to `len(bars) - 2`:
 1. **Funding**: if a position is open and `bars[t].funding_rate` is not None, cash += `-position × NOTIONAL × funding_rate` (longs pay when positive).
 2. **Gap rule**: if `bars[t+1].complete` is False, flatten at bar `t` close with full costs and skip the strategy call; do not re-enter until the next complete bar.
 3. **Decision**: `target = strategy.target(bars[:t+1])`, clamped to `[-1, 1]`.
-4. **Fill**: if `target != position`, fill the delta at `fill_price = minute_close_at(bars[t+1].open_ts + LATENCY_S)` (the close of the 1-minute candle containing that instant, same source). If no minute candle exists there, the fill is refused, the bar is logged as `fill_unavailable`, and the position is unchanged — never fabricated at the hourly open.
+4. **Fill**: if `target != position`, fill the delta at `fill_price = minute_close_at(bars[t+1].open_ts + LATENCY_S)` (the close of the 1-minute candle containing that instant, same source). **Amendment 2026-09-11 (Task 5 finding):** Hyperliquid retains only ~5,000 candles per interval, so 1-minute candles exist for ~3.5 days only; refusing every other fill would make proxy screening impossible. When no minute candle exists at that instant the fill uses the next bar's hourly `open` instead, is tagged `fill_source="hourly_open"`, and is counted in `fills_at_hourly_open`; the validation-log record carries that count so a reader sees how much of a result rests on the fallback. 2 s of drift is far below the pre-registered half-spread + 5 bps impact already charged. `fill_unavailable` remains only for the defensive case of a complete bar with no `open`. Native confirmation runs should backfill native 1-minute candles so their fallback count is ~0.
 5. **Costs**: `fill_cost(abs(delta) × NOTIONAL, bars[t].spread_bps, taker_fee_rate, IMPACT_BPS)`.
 6. **Mark**: equity at bar `t+1` close = cash + position × NOTIONAL × (close / entry − 1) for the open leg.
 
@@ -187,7 +187,7 @@ passed: bool      # screened AND source is native AND sufficiency.met
 
 - Ingest: transient HTTP errors retried (3×, honouring `Retry-After`); anything else aborts loudly. Rows are idempotent (`INSERT OR IGNORE`).
 - Bars: never fabricate — missing data yields `complete=False`, never interpolation.
-- Harness: refuses to fill without a minute candle; refuses to trade across gaps; clamps targets; raises on non-finite numbers.
+- Harness: fills at the 1-minute close after latency, falling back to the next hourly open (counted) when no minute candle exists; refuses to trade across gaps; clamps targets; raises on non-finite numbers.
 - Stats: bootstrap on `< 2 × block_len` returns raise `ValueError("insufficient for block bootstrap")` — a run on a tiny dataset fails visibly rather than reporting a CI.
 - Gate: any malformed `validated.json` → `SIGNAL_VALIDATED = False` and a logged warning; never an exception at import (importing the package must not crash the feed).
 
@@ -196,7 +196,7 @@ passed: bool      # screened AND source is native AND sufficiency.met
 Synthetic, deterministic, no network:
 - **Point-in-time**: recording strategy proves `len(history) == t + 1` on every call; harness never passes a bar beyond `t`.
 - **Gap rule**: a series with an incomplete bar forces a flatten and blocks re-entry until the next complete bar.
-- **Fill refusal**: no minute candle at `open_ts + latency` → `fill_unavailable`, position unchanged.
+- **Fill fallback**: no minute candle at `open_ts + latency` → fill at the next bar's hourly open, `fills_at_hourly_open` incremented; a complete bar with no `open` → `fill_unavailable`, position unchanged.
 - **Costs**: hand-computed expected costs for a known delta/spread/fee.
 - **Funding sign**: long position with positive funding loses exactly `notional × rate`.
 - **H1 sanity**: a constructed series where funding spikes then decays must be profitable net of costs on H1 with the pre-registered grid; a constant-funding series must trade never.
