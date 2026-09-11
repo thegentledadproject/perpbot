@@ -33,7 +33,8 @@ class Basis:
                 continue
             window.append(b.close / hl - 1)
         if len(window) < self.lookback or self._proxy.get(history[-1].open_ts) is None:
-            return Decimal(0)
+            self._position = Decimal(0)
+            return self._position
         z = zscore(window)
         if z is None:
             return self._position
@@ -44,3 +45,6 @@ class Basis:
         elif abs(z) < _EXIT_Z:
             self._position = Decimal(0)
         return self._position
+
+    def on_flatten(self) -> None:
+        self._position = Decimal(0)

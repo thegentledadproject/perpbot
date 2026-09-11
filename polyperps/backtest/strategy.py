@@ -19,6 +19,11 @@ class Strategy(Protocol):
         """Desired position as a fraction of notional in [-1, +1], decided after history[-1] closed."""
         ...
 
+    def on_flatten(self) -> None:
+        """Called by the harness after it force-flattens the book on a data gap; reset any
+        internal position/hold state."""
+        ...
+
 
 def clamp_target(x: Decimal) -> Decimal:
     return max(-ONE, min(ONE, x))

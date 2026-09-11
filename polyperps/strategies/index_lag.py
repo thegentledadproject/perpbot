@@ -41,3 +41,7 @@ class IndexLag:
             self._position = Decimal(-1)  # mark above index: expect it to fall
         self._held = 0
         return self._position
+
+    def on_flatten(self) -> None:
+        self._position = Decimal(0)
+        self._held = 0

@@ -120,6 +120,33 @@ def test_gap_forces_flatten_and_blocks_reentry_until_complete():
     assert res.bars_complete == 5
 
 
+class FlattenTracker:
+    name = "flat_track"
+    params = {}
+
+    def __init__(self):
+        self.flattened = 0
+
+    def target(self, history):
+        return Decimal(1)
+
+    def on_flatten(self):
+        self.flattened += 1
+
+
+def test_gap_calls_on_flatten_exactly_once():
+    bars = [bar(0), bar(1), bar(2), bar(3, complete=False), bar(4), bar(5)]
+    s = FlattenTracker()
+    run_backtest(bars, s, minute_closes=minutes(bars), taker_fee_rate=Decimal(0), warmup=0)
+    assert s.flattened == 1
+
+
+def test_gap_scenario_runs_without_error_when_strategy_lacks_on_flatten():
+    bars = [bar(0), bar(1), bar(2), bar(3, complete=False), bar(4), bar(5)]
+    res = run_backtest(bars, Const(1), minute_closes=minutes(bars), taker_fee_rate=Decimal(0), warmup=0)
+    assert res.bars_complete == 5
+
+
 def test_equity_and_returns_track_price():
     bars = [bar(0, "100"), bar(1, "100"), bar(2, "110"), bar(3, "110")]
     res = run_backtest(bars, Const(1), minute_closes=minutes(bars), taker_fee_rate=Decimal(0), warmup=0,

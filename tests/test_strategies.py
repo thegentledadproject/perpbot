@@ -106,6 +106,45 @@ def test_h3_returns_zero_on_proxy_bars():
     assert s.target(bars) == 0
 
 
+def test_h1_on_flatten_resets_stale_position():
+    bars = [bar(i, funding="0.0001") for i in range(47)] + [bar(47 + j, funding="0.01") for j in range(2)]
+    s = FundingReversion(lookback=48, entry_z=Decimal("1.5"), exit_z=Decimal("0.5"))
+    assert s.target(bars) == Decimal(-1)  # entered short on the funding spike
+    s.on_flatten()
+    neutral = [bar(i, funding="0.0001") for i in range(48)]  # constant funding -> z is None -> returns _position
+    assert s.target(neutral) == Decimal(0)  # without the reset this would still be -1
+
+
+def test_h2_on_flatten_resets_stale_position():
+    bars = [bar(i) for i in range(24)] + [bar(24 + j, close="103") for j in range(2)]
+    hl = {b.open_ts: Decimal("100") for b in bars}
+    s = Basis(lookback=24, entry_z=Decimal("2.0"), proxy_close_by_hour=hl)
+    assert s.target(bars) == Decimal(-1)  # entered short on the rich basis
+    s.on_flatten()
+    neutral = [bar(i) for i in range(24)]  # flat basis throughout -> z is None -> returns _position
+    assert s.target(neutral) == Decimal(0)  # without the reset this would still be -1
+
+
+def test_h2_early_return_resets_state_on_missing_proxy_hour():
+    bars = [bar(i) for i in range(24)] + [bar(24 + j, close="103") for j in range(2)]
+    hl = {b.open_ts: Decimal("100") for b in bars}
+    s = Basis(lookback=24, entry_z=Decimal("2.0"), proxy_close_by_hour=hl)
+    assert s.target(bars) == Decimal(-1)  # entered short
+    missing_hour = bars + [bar(26)]  # bar 26's open_ts is not in hl
+    assert s.target(missing_hour) == Decimal(0)  # early return
+    neutral = [bar(i) for i in range(24)]
+    assert s.target(neutral) == Decimal(0)  # a following neutral call must not see the stale -1
+
+
+def test_h3_on_flatten_resets_stale_position_and_hold_counter():
+    bars = [bar(0, index="100"), bar(1, index="100.5")]
+    s = IndexLag(entry_bps=Decimal("25"), hold_bars=3)
+    assert s.target(bars[:2]) == Decimal(1)  # entered long
+    s.on_flatten()
+    neutral = [bar(2, close="100", index="100")]  # premium 0bps, below entry_bps -> no re-entry
+    assert s.target(neutral) == Decimal(0)  # without the reset this would still be 1 (mid-hold)
+
+
 def test_build_strategy():
     assert build_strategy("h1", GRIDS["h1"][0]).name == "h1_funding_reversion"
     assert build_strategy("h3", GRIDS["h3"][0]).name == "h3_index_lag"

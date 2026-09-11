@@ -157,6 +157,11 @@ def run_backtest(
             # book.position != 0 — the guard below is defensive, not a live path.
             if book.position != 0 and bar.close is not None:
                 trade_to(Decimal(0), bar.close, bar.spread_bps, bar.open_ts, "gap_flatten")
+                # Simple test strategies may not implement on_flatten; only real ones need to
+                # reset internal position/hold state after a forced flatten.
+                hook = getattr(strategy, "on_flatten", None)
+                if callable(hook):
+                    hook()
             mark(nxt.open_ts, nxt.close)
             continue
 

@@ -33,3 +33,6 @@ class FundingReversion:
         elif abs(z) < self.exit_z:
             self._position = Decimal(0)
         return self._position
+
+    def on_flatten(self) -> None:
+        self._position = Decimal(0)
