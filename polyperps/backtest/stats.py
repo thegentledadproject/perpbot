@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import random
 from collections.abc import Sequence
-from decimal import Decimal
+from decimal import ROUND_CEILING, Decimal
 from statistics import mean, stdev
 from typing import TypeVar
 
@@ -75,5 +75,5 @@ def block_bootstrap_ci(
 
 def chronological_split(items: Sequence[T], *, holdout_fraction: Decimal) -> tuple[list[T], list[T]]:
     n = len(items)
-    k = math.ceil(n * float(holdout_fraction))
+    k = int((Decimal(n) * holdout_fraction).to_integral_value(rounding=ROUND_CEILING))
     return list(items[: n - k]), list(items[n - k :])

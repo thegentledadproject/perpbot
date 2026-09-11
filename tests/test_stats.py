@@ -59,3 +59,11 @@ def test_bootstrap_too_short_raises():
 def test_chronological_split():
     train, hold = chronological_split(list(range(10)), holdout_fraction=Decimal("0.30"))
     assert train == [0, 1, 2, 3, 4, 5, 6] and hold == [7, 8, 9]
+
+
+def test_chronological_split_is_exact_for_awkward_fractions():
+    _, hold = chronological_split(list(range(100)), holdout_fraction=Decimal("0.55"))
+    assert len(hold) == 55  # float(Decimal("0.55")) * 100 can drift above 55.0 and ceil to 56
+
+    _, hold2 = chronological_split(list(range(7)), holdout_fraction=Decimal("0.30"))
+    assert len(hold2) == 3  # ceil(2.1) == 3
