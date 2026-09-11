@@ -19,6 +19,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime, timezone
 from decimal import Decimal
+from email.utils import parsedate_to_datetime
 
 import httpx
 
@@ -45,6 +46,30 @@ def _ms(dt: datetime) -> int:
 
 def _from_ms(ms: int) -> datetime:
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
+
+
+def _retry_after_seconds(value: str | None) -> float | None:
+    """Parse a Retry-After header value.
+
+    RFC 7231 allows two forms: delta-seconds ("7") or an HTTP-date
+    ("Wed, 21 Oct 2026 07:28:00 GMT"). Delta-seconds parses directly; the
+    date form is converted to seconds-from-now (clamped at 0.0 so a date in
+    the past never yields a negative sleep). Anything unparseable, or a
+    missing header, returns None.
+    """
+    if not value:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        pass
+    try:
+        when = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return max(0.0, (when - datetime.now(timezone.utc)).total_seconds())
 
 
 def parse_funding_history(
@@ -105,7 +130,7 @@ class HyperliquidClient:
         if resp.status_code == 429 or resp.status_code >= 500:
             ra = resp.headers.get("Retry-After")
             raise TransientProxyError(
-                f"HTTP {resp.status_code}", retry_after=float(ra) if ra else None
+                f"HTTP {resp.status_code}", retry_after=_retry_after_seconds(ra)
             )
         resp.raise_for_status()
         data = resp.json()

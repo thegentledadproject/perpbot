@@ -1,12 +1,14 @@
 import json
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from email.utils import format_datetime
 
 import httpx
 import pytest
 
 from polyperps.data_ingest.hyperliquid import (
-    HyperliquidClient, TransientProxyError, parse_candles, parse_funding_history,
+    HyperliquidClient, TransientProxyError, _retry_after_seconds, parse_candles,
+    parse_funding_history,
 )
 from polyperps.exchange.rate_limiter import TokenBucket
 from polyperps.exchange.types import SourceType
@@ -112,3 +114,25 @@ async def test_400_is_not_transient():
     with pytest.raises(httpx.HTTPStatusError):
         await c.funding_history("XXX", start=T0, end=T0 + timedelta(hours=1), instrument_id=6)
     await c.close()
+
+
+def test_retry_after_seconds_delta_and_invalid():
+    assert _retry_after_seconds("7") == 7.0
+    assert _retry_after_seconds("garbage") is None
+    assert _retry_after_seconds(None) is None
+
+
+async def test_429_with_http_date_retry_after_does_not_crash():
+    future = datetime.now(UTC) + timedelta(seconds=30)
+
+    def handler(request):
+        return httpx.Response(
+            429, headers={"Retry-After": format_datetime(future, usegmt=True)}, json={"error": "rate limited"}
+        )
+
+    c = make_client(handler)
+    with pytest.raises(TransientProxyError) as exc:
+        await c.funding_history("BTC", start=T0, end=T0 + timedelta(hours=1), instrument_id=6)
+    await c.close()
+    assert exc.value.retry_after is not None
+    assert 0 <= exc.value.retry_after <= 60
