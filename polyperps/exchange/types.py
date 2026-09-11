@@ -123,3 +123,14 @@ class Candle:
     def __post_init__(self) -> None:
         _require_aware(self)
         _require_source_type(self)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class FeeSchedule:
+    category: str
+    taker_fee_rate: Decimal
+    maker_fee_rate: Decimal
+    fetched_at: datetime
+
+    def __post_init__(self) -> None:
+        _require_aware(self)

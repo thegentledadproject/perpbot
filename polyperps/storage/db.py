@@ -15,6 +15,7 @@ from polyperps.exchange.types import (
     BookLevel,
     BookSnapshot,
     Candle,
+    FeeSchedule,
     FundingObservation,
     SourceType,
     Tick,
@@ -72,6 +73,14 @@ CREATE TABLE IF NOT EXISTS rejections (
     at            TEXT NOT NULL,
     reason        TEXT NOT NULL,
     detail        TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS fee_schedule (
+    category       TEXT NOT NULL,
+    taker_fee_rate TEXT NOT NULL,
+    maker_fee_rate TEXT NOT NULL,
+    fetched_at     TEXT NOT NULL,
+    PRIMARY KEY (category, fetched_at)
 );
 """
 
@@ -146,14 +155,47 @@ def insert_rejection(
     conn.commit()
 
 
+def insert_fee(conn: sqlite3.Connection, fee: FeeSchedule) -> bool:
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO fee_schedule VALUES (?,?,?,?)",
+        (fee.category, str(fee.taker_fee_rate), str(fee.maker_fee_rate), _ts(fee.fetched_at)),
+    )
+    conn.commit()
+    return cur.rowcount == 1
+
+
+def latest_fee(conn: sqlite3.Connection, category: str) -> FeeSchedule | None:
+    row = conn.execute(
+        "SELECT category, taker_fee_rate, maker_fee_rate, fetched_at FROM fee_schedule "
+        "WHERE category=? ORDER BY fetched_at DESC LIMIT 1",
+        (category,),
+    ).fetchone()
+    if row is None:
+        return None
+    return FeeSchedule(category=row[0], taker_fee_rate=Decimal(row[1]),
+                       maker_fee_rate=Decimal(row[2]), fetched_at=_parse_ts(row[3]))
+
+
+def _source_clause(source_type: SourceType | None) -> tuple[str, tuple[str, ...]]:
+    if source_type is None:
+        return "", ()
+    return " AND source_type=?", (source_type.value,)
+
+
 def query_ticks(
-    conn: sqlite3.Connection, instrument_id: int, *, start: datetime, end: datetime
+    conn: sqlite3.Connection,
+    instrument_id: int,
+    *,
+    start: datetime,
+    end: datetime,
+    source_type: SourceType | None = None,
 ) -> list[Tick]:
+    clause, extra = _source_clause(source_type)
     rows = conn.execute(
         "SELECT instrument_id, source_type, exchange_ts, received_ts, sequence, mark_price, "
         "index_price, last_price, funding_rate, next_funding FROM ticks "
-        "WHERE instrument_id=? AND exchange_ts BETWEEN ? AND ? ORDER BY exchange_ts, sequence",
-        (instrument_id, _ts(start), _ts(end)),
+        f"WHERE instrument_id=? AND exchange_ts BETWEEN ? AND ?{clause} ORDER BY exchange_ts, sequence",
+        (instrument_id, _ts(start), _ts(end), *extra),
     ).fetchall()
     return [
         Tick(
@@ -167,13 +209,19 @@ def query_ticks(
 
 
 def query_funding(
-    conn: sqlite3.Connection, instrument_id: int, *, start: datetime, end: datetime
+    conn: sqlite3.Connection,
+    instrument_id: int,
+    *,
+    start: datetime,
+    end: datetime,
+    source_type: SourceType | None = None,
 ) -> list[FundingObservation]:
+    clause, extra = _source_clause(source_type)
     rows = conn.execute(
         "SELECT instrument_id, source_type, exchange_ts, received_ts, funding_rate "
-        "FROM funding_rates WHERE instrument_id=? AND exchange_ts BETWEEN ? AND ? "
+        f"FROM funding_rates WHERE instrument_id=? AND exchange_ts BETWEEN ? AND ?{clause} "
         "ORDER BY exchange_ts",
-        (instrument_id, _ts(start), _ts(end)),
+        (instrument_id, _ts(start), _ts(end), *extra),
     ).fetchall()
     return [
         FundingObservation(
@@ -182,6 +230,53 @@ def query_funding(
         )
         for r in rows
     ]
+
+
+def query_candles(
+    conn: sqlite3.Connection,
+    instrument_id: int,
+    *,
+    interval: str,
+    source_type: SourceType,
+    start: datetime,
+    end: datetime,
+) -> list[Candle]:
+    rows = conn.execute(
+        "SELECT instrument_id, interval, source_type, open_ts, received_ts, open, high, low, close, "
+        "volume, trades FROM candles WHERE instrument_id=? AND interval=? AND source_type=? "
+        "AND open_ts BETWEEN ? AND ? ORDER BY open_ts",
+        (instrument_id, interval, source_type.value, _ts(start), _ts(end)),
+    ).fetchall()
+    return [
+        Candle(
+            instrument_id=r[0], interval=r[1], source_type=SourceType(r[2]), open_ts=_parse_ts(r[3]),
+            received_ts=_parse_ts(r[4]), open=Decimal(r[5]), high=Decimal(r[6]), low=Decimal(r[7]),
+            close=Decimal(r[8]), volume=Decimal(r[9]), trades=r[10],
+        )
+        for r in rows
+    ]
+
+
+def query_book_spread_bps(
+    conn: sqlite3.Connection, instrument_id: int, *, start: datetime, end: datetime
+) -> list[tuple[datetime, Decimal]]:
+    """Top-of-book spread in basis points per stored snapshot; snapshots missing a side are skipped."""
+    rows = conn.execute(
+        "SELECT exchange_ts, bids_json, asks_json FROM book_snapshots "
+        "WHERE instrument_id=? AND exchange_ts BETWEEN ? AND ? ORDER BY exchange_ts",
+        (instrument_id, _ts(start), _ts(end)),
+    ).fetchall()
+    out: list[tuple[datetime, Decimal]] = []
+    for ts, bids_json, asks_json in rows:
+        bids = json.loads(bids_json)
+        asks = json.loads(asks_json)
+        if not bids or not asks:
+            continue
+        best_bid = max(Decimal(l["price"]) for l in bids)
+        best_ask = min(Decimal(l["price"]) for l in asks)
+        mid = (best_bid + best_ask) / 2
+        out.append((_parse_ts(ts), (best_ask - best_bid) / mid * Decimal(10_000)))
+    return out
 
 
 def count_rejections(conn: sqlite3.Connection, instrument_id: int) -> dict[str, int]:
