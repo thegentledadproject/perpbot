@@ -77,3 +77,34 @@ def test_load_settings_parses_env(tmp_path):
 def test_load_settings_requires_instruments():
     with pytest.raises(ValueError, match="POLYPERPS_INSTRUMENT_IDS"):
         load_settings({})
+
+
+async def test_market_feed_does_not_close_the_ticks_generator_on_error():
+    # MarketFeed.run() must propagate an error from a callback without
+    # closing the underlying ticks generator itself - closing it is the
+    # caller's job (see scripts/run_feed.py's `await ticks.aclose()` in its
+    # `finally`). This test documents that contract at the MarketFeed level.
+    state = {"closed": False}
+
+    async def gen_with_cleanup():
+        try:
+            yield tick(0, 1)
+            yield tick(1, 2)
+        finally:
+            state["closed"] = True
+
+    g = gen_with_cleanup()
+
+    def on_accept(t):
+        raise RuntimeError("boom")
+
+    feed = MarketFeed(ticks=g, bounds=DEFAULT_BOUNDS, on_accept=on_accept)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await feed.run()
+
+    assert state["closed"] is False
+
+    await g.aclose()
+
+    assert state["closed"] is True

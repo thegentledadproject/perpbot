@@ -16,7 +16,9 @@ loop restarts it with backoff so a 48h soak survives transient failures.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import signal
 import sys
 from datetime import datetime, timezone
 
@@ -79,8 +81,9 @@ async def run_once(settings) -> None:
                             detail=rej.detail, at=tick.received_ts)
         log.warning("rejected %s seq=%s: %s %s", tick.instrument_id, tick.sequence, rej.reason, rej.detail)
 
+    ticks = client.stream_ticks(settings.instrument_ids)
     feed = MarketFeed(
-        ticks=client.stream_ticks(settings.instrument_ids),
+        ticks=ticks,
         bounds=settings.bounds,
         on_accept=lambda t: db.insert_tick(conn, t),
         on_reject=on_reject,
@@ -94,6 +97,8 @@ async def run_once(settings) -> None:
     finally:
         stop.set()
         await asyncio.gather(*tasks, return_exceptions=True)
+        with contextlib.suppress(Exception):
+            await ticks.aclose()
         await client.close()
         conn.close()
 
@@ -119,7 +124,12 @@ async def main() -> None:
         await asyncio.sleep(backoff)
 
 
+def _raise_keyboard_interrupt(signum, frame):
+    raise KeyboardInterrupt
+
+
 if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
