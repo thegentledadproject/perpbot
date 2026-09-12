@@ -45,3 +45,8 @@ def test_reject_when_no_room():
     assert isinstance(v, Reject) and "cluster" in v.reason
     v = vet_exposure(intent(9, "100"), positions=[pos(6, "1000")], equity=Decimal(1000), categories=CATS)
     assert isinstance(v, Reject) and "gross" in v.reason
+
+
+def test_reject_when_equity_non_positive():
+    v = vet_exposure(intent(6, "100"), positions=[], equity=Decimal(0), categories=CATS)
+    assert v == Reject(reason="equity <= 0")

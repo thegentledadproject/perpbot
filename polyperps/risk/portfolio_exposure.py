@@ -34,6 +34,9 @@ def vet_exposure(
     categories: Mapping[int, str],
     limits: ExposureLimits = EXPOSURE,
 ) -> Verdict:
+    if equity <= 0:
+        return Reject(reason="equity <= 0")
+
     sign = Decimal(1) if intent.side == "buy" else Decimal(-1)
     my_cluster = cluster_of(categories.get(intent.instrument_id, "other"))
     gross_existing = sum((p.notional for p in positions), Decimal(0))

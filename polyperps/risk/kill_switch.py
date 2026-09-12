@@ -1,6 +1,10 @@
 """Spec 2.6 mechanism. THRESHOLDS are None in Phase 2a: with None, a live run
 evaluates to "pause" (cannot start) and a paper run to "run". The numbers are
-set in Phase 2b from a passing native validation record - never here."""
+set in Phase 2b from a passing native validation record - never here.
+
+An undefined divergence (missing sharpe input, or backtest_sharpe == 0) falls
+back to the same mode default as None thresholds: "pause" for live, "run" for
+paper - never a bare "pause" regardless of mode."""
 
 from __future__ import annotations
 
@@ -38,7 +42,7 @@ def evaluate(
         return "pause" if mode == "live" else "run"
     d = divergence(live_sharpe, backtest_sharpe)
     if d is None:
-        return "pause"
+        return "pause" if mode == "live" else "run"
     if d >= thresholds.shutdown:
         return "shutdown"
     if d >= thresholds.pause:

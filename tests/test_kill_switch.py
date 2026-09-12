@@ -24,3 +24,9 @@ def test_with_numbers():
 def test_divergence():
     assert divergence(0.6, 1.2) == Decimal("0.5")
     assert divergence(1.0, 0.0) is None and divergence(None, 1.0) is None
+
+
+def test_numeric_thresholds_but_undefined_divergence_falls_back_to_mode_default():
+    t = KillThresholds(pause=Decimal("0.5"), shutdown=Decimal("1.0"))
+    assert evaluate(live_sharpe=1.0, backtest_sharpe=0.0, mode="paper", thresholds=t) == "run"
+    assert evaluate(live_sharpe=1.0, backtest_sharpe=0.0, mode="live", thresholds=t) == "pause"
