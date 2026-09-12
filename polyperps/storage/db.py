@@ -268,14 +268,63 @@ def query_book_spread_bps(
     ).fetchall()
     out: list[tuple[datetime, Decimal]] = []
     for ts, bids_json, asks_json in rows:
-        bids = json.loads(bids_json)
-        asks = json.loads(asks_json)
-        if not bids or not asks:
-            continue
-        best_bid = max(Decimal(l["price"]) for l in bids)
-        best_ask = min(Decimal(l["price"]) for l in asks)
-        mid = (best_bid + best_ask) / 2
-        out.append((_parse_ts(ts), (best_ask - best_bid) / mid * Decimal(10_000)))
+        bps = _spread_bps(bids_json, asks_json)
+        if bps is not None:
+            out.append((_parse_ts(ts), bps))
+    return out
+
+
+def _floor_hour(dt: datetime) -> datetime:
+    return dt.replace(minute=0, second=0, microsecond=0)
+
+
+# Mirrors polyperps.signal.sufficiency.NATIVE_SOURCES (which imports this module, so it
+# cannot be imported here); tests/test_storage_phase1.py pins the two equal.
+_NATIVE_TICK_SOURCES = (SourceType.POLYMARKET_WS.value, SourceType.POLYMARKET_REST.value)
+
+
+def query_last_index_by_hour(
+    conn: sqlite3.Connection, instrument_id: int, *, start: datetime, end: datetime
+) -> dict[datetime, Decimal]:
+    """Last native index_price per hour in [start, end]. Streams the cursor: one row in
+    memory at a time, no Tick objects -- weeks of ticks must not be materialised for bars."""
+    cur = conn.execute(
+        "SELECT exchange_ts, index_price FROM ticks WHERE instrument_id=? AND source_type IN (?, ?) "
+        "AND exchange_ts BETWEEN ? AND ? ORDER BY exchange_ts, sequence",
+        (instrument_id, *_NATIVE_TICK_SOURCES, _ts(start), _ts(end)),
+    )
+    out: dict[datetime, Decimal] = {}
+    for ts, index_price in cur:
+        out[_floor_hour(_parse_ts(ts))] = Decimal(index_price)  # ordered by ts: last wins
+    return out
+
+
+def _spread_bps(bids_json: str, asks_json: str) -> Decimal | None:
+    bids = json.loads(bids_json)
+    asks = json.loads(asks_json)
+    if not bids or not asks:
+        return None
+    best_bid = max(Decimal(l["price"]) for l in bids)
+    best_ask = min(Decimal(l["price"]) for l in asks)
+    mid = (best_bid + best_ask) / 2
+    return (best_ask - best_bid) / mid * Decimal(10_000)
+
+
+def query_book_spread_bps_by_hour(
+    conn: sqlite3.Connection, instrument_id: int, *, start: datetime, end: datetime
+) -> dict[datetime, list[Decimal]]:
+    """Top-of-book spreads (bps) grouped by hour in [start, end]; snapshots missing a side are
+    skipped. Streams the cursor like query_last_index_by_hour."""
+    cur = conn.execute(
+        "SELECT exchange_ts, bids_json, asks_json FROM book_snapshots "
+        "WHERE instrument_id=? AND exchange_ts BETWEEN ? AND ? ORDER BY exchange_ts",
+        (instrument_id, _ts(start), _ts(end)),
+    )
+    out: dict[datetime, list[Decimal]] = {}
+    for ts, bids_json, asks_json in cur:
+        bps = _spread_bps(bids_json, asks_json)
+        if bps is not None:
+            out.setdefault(_floor_hour(_parse_ts(ts)), []).append(bps)
     return out
 
 

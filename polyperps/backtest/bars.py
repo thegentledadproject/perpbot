@@ -16,7 +16,9 @@ from typing import Literal
 
 from polyperps.exchange.types import SourceType
 from polyperps.signal.sufficiency import BAR, NATIVE_SOURCES
-from polyperps.storage.db import query_book_spread_bps, query_candles, query_funding, query_ticks
+from polyperps.storage.db import (
+    query_book_spread_bps_by_hour, query_candles, query_funding, query_last_index_by_hour,
+)
 
 HOUR = timedelta(hours=1)
 
@@ -78,12 +80,11 @@ def build_bars(
     index_by_hour: dict[datetime, Decimal] = {}
     spreads_by_hour: dict[datetime, list[Decimal]] = {}
     if native:
-        for t in query_ticks(conn, instrument_id, start=first, end=last_open + HOUR - timedelta(microseconds=1)):
-            if is_native(t.source_type):
-                index_by_hour[floor_hour(t.exchange_ts)] = t.index_price  # ordered by ts: last wins
-        for ts, bps in query_book_spread_bps(conn, instrument_id, start=first,
-                                             end=last_open + HOUR - timedelta(microseconds=1)):
-            spreads_by_hour.setdefault(floor_hour(ts), []).append(bps)
+        # Streamed per-hour reductions: native tick tables hold millions of rows, so the
+        # bars layer never materialises Tick/BookSnapshot objects (F8, final review).
+        tick_end = last_open + HOUR - timedelta(microseconds=1)
+        index_by_hour = query_last_index_by_hour(conn, instrument_id, start=first, end=tick_end)
+        spreads_by_hour = query_book_spread_bps_by_hour(conn, instrument_id, start=first, end=tick_end)
 
     bars: list[Bar] = []
     open_ts = first

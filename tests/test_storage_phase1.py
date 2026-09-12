@@ -7,7 +7,8 @@ from polyperps.exchange.types import (
 )
 from polyperps.storage.db import (
     connect, insert_book, insert_candle, insert_fee, insert_funding, insert_tick,
-    latest_fee, query_book_spread_bps, query_candles, query_funding, query_ticks,
+    latest_fee, query_book_spread_bps, query_book_spread_bps_by_hour, query_candles, query_funding,
+    query_last_index_by_hour, query_ticks,
 )
 
 UTC = timezone.utc
@@ -82,3 +83,50 @@ def test_query_book_spread_bps():
     insert_book(conn, empty)
     rows = query_book_spread_bps(conn, 6, start=T0, end=T0 + H)
     assert rows == [(T0, Decimal("100"))]  # (100.5-99.5)/100 * 1e4 = 100 bps
+
+
+def _tick(ts, index, st=SourceType.POLYMARKET_WS, seq=None):
+    return Tick(instrument_id=6, mark_price=Decimal("100"), index_price=Decimal(index), last_price=Decimal("100"),
+                funding_rate=Decimal("0"), next_funding=ts, exchange_ts=ts, received_ts=ts, source_type=st,
+                sequence=seq if seq is not None else int(ts.timestamp()))
+
+
+def test_query_last_index_by_hour_last_per_hour_wins_native_only():
+    conn = connect(":memory:")
+    insert_tick(conn, _tick(T0 + timedelta(minutes=10), "100.1"))
+    insert_tick(conn, _tick(T0 + timedelta(minutes=50), "100.9"))                # last in hour 0
+    insert_tick(conn, _tick(T0 + timedelta(minutes=55), "777", st=SourceType.PROXY_HYPERLIQUID))  # ignored
+    insert_tick(conn, _tick(T0 + H + timedelta(minutes=1), "101.0", st=SourceType.POLYMARKET_REST))
+    insert_tick(conn, _tick(T0 + 2 * H + timedelta(minutes=30), "102.0"))     # outside [start, end]
+    insert_tick(conn, _tick(T0 - timedelta(minutes=1), "99.0"))                 # before start
+    out = query_last_index_by_hour(conn, 6, start=T0, end=T0 + 2 * H - timedelta(microseconds=1))
+    assert out == {T0: Decimal("100.9"), T0 + H: Decimal("101.0")}
+    assert query_last_index_by_hour(conn, 7, start=T0, end=T0 + 2 * H) == {}
+
+
+def test_query_last_index_by_hour_matches_native_sources_constant():
+    from polyperps.signal.sufficiency import NATIVE_SOURCES
+    from polyperps.storage.db import _NATIVE_TICK_SOURCES
+    assert set(_NATIVE_TICK_SOURCES) == {s.value for s in NATIVE_SOURCES}
+
+
+def _book(ts, bid, ask):
+    return BookSnapshot(instrument_id=6, bids=(BookLevel(price=Decimal(bid), quantity=Decimal(1)),),
+                        asks=(BookLevel(price=Decimal(ask), quantity=Decimal(1)),),
+                        exchange_ts=ts, received_ts=ts, source_type=SourceType.POLYMARKET_REST)
+
+
+def test_query_book_spread_bps_by_hour_groups_and_skips_one_sided_books():
+    conn = connect(":memory:")
+    insert_book(conn, _book(T0 + timedelta(minutes=5), "99.5", "100.5"))    # 100 bps, hour 0
+    insert_book(conn, _book(T0 + timedelta(minutes=35), "99.9", "100.1"))   # 20 bps, hour 0
+    insert_book(conn, BookSnapshot(instrument_id=6, bids=(), asks=(BookLevel(price=Decimal(1), quantity=Decimal(1)),),
+                                   exchange_ts=T0 + timedelta(minutes=40), received_ts=T0,
+                                   source_type=SourceType.POLYMARKET_REST))  # one-sided: skipped
+    insert_book(conn, _book(T0 + H + timedelta(minutes=1), "99", "101"))    # 200 bps, hour 1
+    insert_book(conn, _book(T0 + 3 * H, "99", "101"))                        # outside range
+    out = query_book_spread_bps_by_hour(conn, 6, start=T0, end=T0 + 2 * H - timedelta(microseconds=1))
+    assert out == {T0: [Decimal("100"), Decimal("20")], T0 + H: [Decimal("200")]}
+    # the per-snapshot query and the grouped query agree
+    flat = query_book_spread_bps(conn, 6, start=T0, end=T0 + 2 * H - timedelta(microseconds=1))
+    assert [bps for _, bps in flat] == [Decimal("100"), Decimal("20"), Decimal("200")]
