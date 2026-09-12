@@ -163,13 +163,14 @@ BAR = SufficiencyBar(
 `scripts/run_backtest.py` appends one JSON object per line to `polyperps/signal/validation_log.jsonl` (committed) for every run:
 ```
 run_id, ts, hypothesis, instrument_id, source_type, params_chosen, grid_tried,
-dataset {start, end, bars, complete_bars, funding_periods, days},
+dataset {start, end, bars, complete_bars, funding_periods, days,
+         tested_start, tested_end, tested_days, holdout_bars},   # tested_* = span actually backtested after trimming (added 2026-09-12)
 fee_used, latency_s, impact_bps, seed,
 train {sharpe, max_dd, hit_rate, turnover, n},
-holdout {sharpe, max_dd, hit_rate, turnover, n, ci_lo, ci_hi},
+holdout {sharpe, max_dd, hit_rate, turnover, n, ci_lo, ci_hi, fills, fills_unavailable, fills_at_hourly_open, bars_constant_spread},
 sufficiency {met, shortfall},
 screened: bool,   # holdout cleared the stats thresholds, any source
-passed: bool      # screened AND source is native AND sufficiency.met
+passed: bool      # screened AND source is native AND sufficiency.met AND holdout.fills_at_hourly_open == 0 AND tested_days >= min_days (see 8.3)
 ```
 `passed` can only be `True` for `POLYMARKET_*` sources with `sufficiency.met`. Negative and insufficient results are appended too — nothing is discarded. `validation_log.read_passing() -> list[record]`.
 
@@ -183,6 +184,9 @@ passed: bool      # screened AND source is native AND sufficiency.met
 - Two keys therefore: a passing native record written by code, and a deliberate human commit of `validated.json`. Neither alone flips the flag. This satisfies the parent spec's "code-enforced, not discipline-only" and its "manual, never self-adjusting" boundary simultaneously.
 - `generate_signal` remains `NotImplementedError`. Selecting which validated strategy to run live is a Phase 2 decision.
 - `gates.live_orders_allowed` is unchanged; it already reads `SIGNAL_VALIDATED` at call time.
+
+### 8.3 Amendment 2026-09-12 (pre-registered before any native result)
+`passed` additionally requires zero hourly-open fallback fills on the holdout and a tested span ≥ `min_days`; the gate re-checks these from the record. Concretely: `evaluate_run` takes `holdout_fills_at_hourly_open` and `tested_days` and returns `passed = screened AND native AND sufficiency.met AND holdout_fills_at_hourly_open == 0 AND tested_days >= BAR.min_days` (`screened` is unchanged); `load_validated` accepts a record only if, besides `passed is True`, its `source_type` is native, `sufficiency.met is True` and `holdout.fills_at_hourly_open` is the integer `0` — any missing key is a `False`. Rationale: a native confirmation whose holdout fills were priced off the hourly open (no 1-minute candle) rests on an untested execution assumption, and `check_dataset` measures the span *stored*, not the span *backtested* after trimming incomplete edges. No native result existed when this was written (earliest possible native pass ≈ 2026-10-11).
 
 ## 9. Error handling
 

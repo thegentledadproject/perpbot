@@ -18,7 +18,7 @@ defaults to "crypto" and is recorded verbatim in the run log as
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -36,6 +36,7 @@ from polyperps.strategies import GRIDS, build_strategy
 
 _SOURCES = {"native": SourceType.POLYMARKET_REST, "hyperliquid": SourceType.PROXY_HYPERLIQUID}
 _EPOCH = datetime(2000, 1, 1, tzinfo=timezone.utc)
+HOUR = timedelta(hours=1)
 
 
 def _stats(res, *, bootstrap: bool, seed: int) -> dict:
@@ -120,8 +121,12 @@ def main() -> None:
         hstats = _stats(hres, bootstrap=True, seed=args.seed)
 
         suff = check_dataset(conn, args.instrument, source, now=now)
+        tested_start, tested_end = bars[0].open_ts, bars[-1].open_ts + HOUR  # close of the last bar
+        tested_days = (Decimal((tested_end - tested_start).total_seconds()) / Decimal(86_400)).quantize(Decimal("0.01"))
         screened, passed = evaluate_run(source_type=source, sufficiency=suff,
-                                        holdout_sharpe=hstats["sharpe"], ci_lo=hstats["ci_lo"], ci_hi=hstats["ci_hi"])
+                                        holdout_sharpe=hstats["sharpe"], ci_lo=hstats["ci_lo"], ci_hi=hstats["ci_hi"],
+                                        holdout_fills_at_hourly_open=hstats["fills_at_hourly_open"],
+                                        tested_days=tested_days)
         record = {
             "run_id": make_run_id(now, args.hypothesis, args.instrument, source),
             "ts": now.isoformat(),
@@ -132,7 +137,10 @@ def main() -> None:
             "grid_tried": [p for p, _ in trials],
             "dataset": {"start": bars[0].open_ts.isoformat(), "end": bars[-1].open_ts.isoformat(),
                         "bars": len(bars), "complete_bars": sum(b.complete for b in bars),
-                        "funding_periods": suff.funding_periods, "days": str(suff.days)},
+                        "funding_periods": suff.funding_periods, "days": str(suff.days),
+                        # span actually backtested (after trimming), vs `days` = span stored
+                        "tested_start": tested_start.isoformat(), "tested_end": tested_end.isoformat(),
+                        "tested_days": str(tested_days), "holdout_bars": len(holdout)},
             "fee_used": str(fee.taker_fee_rate), "fee_category_used": args.fee_category,
             "fee_fetched_at": fee.fetched_at.isoformat(),
             "latency_s": BAR.latency_s, "impact_bps": str(BAR.impact_bps), "seed": args.seed,

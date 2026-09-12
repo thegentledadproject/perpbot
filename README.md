@@ -86,3 +86,6 @@ Every run appends to `polyperps/signal/validation_log.jsonl` (committed).
 `SIGNAL_VALIDATED` flips to `True` only when `polyperps/signal/validated.json`
 names a `passed=True` native record **and** carries `approved_by`/`approved_at`
 — a deliberate, reviewed commit by a human. No code path writes that file.
+Since the 2026-09-12 amendment (spec §8.3) `passed` also requires zero hourly-open
+fallback fills on the holdout and a backtested span of at least 60 days, and the
+gate re-checks those from the record rather than trusting the flag.

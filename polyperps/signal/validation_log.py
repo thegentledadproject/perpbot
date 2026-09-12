@@ -2,16 +2,23 @@
 
 `passed` is True only for a native-source run whose dataset met the bar AND
 whose holdout statistics cleared it. Proxy runs can only be `screened`.
+
+Amendment 2026-09-12 (spec 8.3, pre-registered before any native result):
+`passed` additionally requires zero hourly-open fallback fills on the holdout
+and a tested span of at least BAR.min_days. `screened` is unchanged.
 """
 
 from __future__ import annotations
 
 import json
 from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 
 from polyperps.exchange.types import SourceType
-from polyperps.signal.sufficiency import NATIVE_SOURCES, SufficiencyReport, stats_clear_bar
+from polyperps.signal.sufficiency import (
+    BAR, NATIVE_SOURCES, SufficiencyBar, SufficiencyReport, stats_clear_bar,
+)
 
 LOG_PATH = Path(__file__).with_name("validation_log.jsonl")
 
@@ -52,11 +59,20 @@ def evaluate_run(
     holdout_sharpe: float,
     ci_lo: float | None,
     ci_hi: float | None,
+    holdout_fills_at_hourly_open: int,
+    tested_days: Decimal,
+    bar: SufficiencyBar = BAR,
 ) -> tuple[bool, bool]:
     if ci_lo is None or ci_hi is None:
         # A run without a CI (too few holdout returns for the block bootstrap) can
         # neither screen nor pass -- there is nothing to judge significance against.
         return False, False
-    screened = stats_clear_bar(oos_sharpe=holdout_sharpe, ci_lo=ci_lo, ci_hi=ci_hi)
-    passed = screened and source_type in NATIVE_SOURCES and sufficiency.met
+    screened = stats_clear_bar(oos_sharpe=holdout_sharpe, ci_lo=ci_lo, ci_hi=ci_hi, bar=bar)
+    passed = (
+        screened
+        and source_type in NATIVE_SOURCES
+        and sufficiency.met
+        and holdout_fills_at_hourly_open == 0   # every holdout fill priced off a real 1m candle
+        and tested_days >= bar.min_days          # the span actually backtested, not just stored
+    )
     return screened, passed
