@@ -1,7 +1,13 @@
 """Spec 1.2: run one hypothesis on one instrument/source, log the result.
 
     POLYPERPS_INSTRUMENT_IDS=6 .venv/Scripts/python scripts/run_backtest.py \
-        --hypothesis h1 --instrument 6 --source hyperliquid [--fee-category crypto] [--seed 42]
+        --hypothesis h1 --instrument 6 --source hyperliquid [--fee-category crypto] [--seed 42] \
+        [--end 2026-09-12T00:00:00+00:00]
+
+--end (ISO-8601, default: now) bounds the data window and is recorded, so a
+run can be repeated on the same DB and produce the same numbers. Leading AND
+trailing incomplete bars are trimmed before the split, so the holdout never
+ends in empty hours.
 
 Grid points are evaluated on the chronological train slice; the best by train
 Sharpe runs ONCE on the holdout; the holdout gets a block-bootstrap CI. One JSON
@@ -71,11 +77,14 @@ def main() -> None:
     ap.add_argument("--fee-category", default="crypto")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--log-path", type=Path, default=LOG_PATH)
+    ap.add_argument("--end", type=_parse_end, default=None,
+                    help="ISO-8601 UTC end of the data window (default: now); recorded for reproducibility")
     args = ap.parse_args()
 
     settings = load_settings()
     conn = db.connect(settings.db_path)
     now = datetime.now(timezone.utc)
+    end = args.end or now
     source = _SOURCES[args.source]
     try:
         fee = db.latest_fee(conn, args.fee_category)
@@ -86,21 +95,20 @@ def main() -> None:
                 "(recorded in the run log)"
             )
 
-        bars = build_bars(conn, args.instrument, source, start=_EPOCH, end=now)
+        bars = build_bars(conn, args.instrument, source, start=_EPOCH, end=end)
         if not bars:
             raise SystemExit(f"no bars for {args.instrument}/{source.value}")
-        first = _first_complete(bars)
-        bars = [b for b in bars if b.open_ts >= first]
+        bars = _trim_incomplete_edges(bars)
         if len(bars) < 4 * BAR.block_len:
             raise SystemExit(f"only {len(bars)} bars for {args.instrument}/{source.value}; nothing to test")
-        minute_closes = load_minute_closes(conn, args.instrument, source, start=bars[0].open_ts, end=now)
+        minute_closes = load_minute_closes(conn, args.instrument, source, start=bars[0].open_ts, end=end)
 
         proxy_closes = None
         if args.hypothesis == "h2":
             if source is not SourceType.POLYMARKET_REST:
                 raise SystemExit("h2 trades the native leg: use --source native")
             proxy_bars = build_bars(conn, args.instrument, SourceType.PROXY_HYPERLIQUID,
-                                    start=bars[0].open_ts, end=now)
+                                    start=bars[0].open_ts, end=end)
             proxy_closes = {b.open_ts: b.close for b in proxy_bars if b.complete and b.close is not None}
 
         train, holdout = chronological_split(bars, holdout_fraction=BAR.holdout_fraction)
@@ -120,7 +128,7 @@ def main() -> None:
                             warmup=strat.warmup)
         hstats = _stats(hres, bootstrap=True, seed=args.seed)
 
-        suff = check_dataset(conn, args.instrument, source, now=now)
+        suff = check_dataset(conn, args.instrument, source, now=end)
         tested_start, tested_end = bars[0].open_ts, bars[-1].open_ts + HOUR  # close of the last bar
         tested_days = (Decimal((tested_end - tested_start).total_seconds()) / Decimal(86_400)).quantize(Decimal("0.01"))
         screened, passed = evaluate_run(source_type=source, sufficiency=suff,
@@ -130,6 +138,7 @@ def main() -> None:
         record = {
             "run_id": make_run_id(now, args.hypothesis, args.instrument, source),
             "ts": now.isoformat(),
+            "end": end.isoformat(),  # data-window end (--end); repeat with the same value for the same numbers
             "hypothesis": args.hypothesis,
             "instrument_id": args.instrument,
             "source_type": source.value,
@@ -159,11 +168,19 @@ def main() -> None:
         conn.close()
 
 
-def _first_complete(bars: list[Bar]) -> datetime:
-    for b in bars:
-        if b.complete:
-            return b.open_ts
-    return bars[-1].open_ts
+def _trim_incomplete_edges(bars: list[Bar]) -> list[Bar]:
+    """Drop incomplete bars at both ends; gaps inside stay (the harness handles them)."""
+    complete = [i for i, b in enumerate(bars) if b.complete]
+    if not complete:
+        return []
+    return bars[complete[0]: complete[-1] + 1]
+
+
+def _parse_end(s: str) -> datetime:
+    dt = datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 if __name__ == "__main__":

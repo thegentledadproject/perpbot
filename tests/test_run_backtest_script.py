@@ -31,7 +31,7 @@ def _load_script():
     return module
 
 
-def _seed_db(db_path: Path, *, n_bars: int, with_fee: bool) -> None:
+def _seed_db(db_path: Path, *, n_bars: int, with_fee: bool, last_open: datetime | None = None) -> None:
     conn = connect(db_path)
     try:
         if with_fee:
@@ -39,10 +39,9 @@ def _seed_db(db_path: Path, *, n_bars: int, with_fee: bool) -> None:
                                          maker_fee_rate=Decimal("0.0002"),
                                          fetched_at=datetime.now(UTC)))
         if n_bars:
-            # Anchor to real wall-clock "now" with a buffer: the script always queries
-            # start=_EPOCH..now, so the synthetic window must sit right before "now" or
-            # the trimmed dataset silently balloons with incomplete trailing hours.
-            last_open = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) - 3 * HOUR
+            # Default anchor: real wall-clock "now" with a buffer, matching a run without --end.
+            if last_open is None:
+                last_open = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) - 3 * HOUR
             first_open = last_open - (n_bars - 1) * HOUR
             for i in range(n_bars):
                 open_ts = first_open + i * HOUR
@@ -114,3 +113,36 @@ def test_run_backtest_no_fee_row_exits(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as exc_info:
         module.main()
     assert "no fee row" in str(exc_info.value)
+
+
+def _run(monkeypatch, db_path, log_path, *extra):
+    monkeypatch.setenv("POLYPERPS_DB_PATH", str(db_path))
+    monkeypatch.setenv("POLYPERPS_INSTRUMENT_IDS", "6")
+    monkeypatch.setattr(sys, "argv", [
+        "run_backtest.py", "--hypothesis", "h1", "--instrument", "6", "--source", "native",
+        "--fee-category", "equity", "--log-path", str(log_path), *extra,
+    ])
+    _load_script().main()
+
+
+def test_same_end_reproduces_holdout_and_dataset_and_trims_trailing_incomplete(tmp_path, monkeypatch):
+    db_path = tmp_path / "t.sqlite3"
+    log_path = tmp_path / "log.jsonl"
+    last_open = datetime(2026, 8, 1, 12, 0, tzinfo=UTC)
+    _seed_db(db_path, n_bars=400, with_fee=True, last_open=last_open)
+    end = last_open + 5 * HOUR  # four empty hours after the last candle
+
+    _run(monkeypatch, db_path, log_path, "--end", end.isoformat())
+    _run(monkeypatch, db_path, log_path, "--end", "2026-08-01T17:00:00Z")  # same instant, other spelling
+
+    a, b = read_records(path=log_path)
+    assert a["run_id"] != b["run_id"]
+    assert a["end"] == b["end"] == end.isoformat()
+    assert a["holdout"] == b["holdout"]
+    assert a["dataset"] == b["dataset"]
+    # trailing incomplete hours are trimmed: the tested span ends at the close of the last candle
+    assert a["dataset"]["tested_end"] == (last_open + HOUR).isoformat()
+    assert a["dataset"]["end"] == last_open.isoformat()
+    assert a["dataset"]["bars"] == a["dataset"]["complete_bars"] == 400
+    assert a["dataset"]["tested_days"] == "16.67"  # 400 h / 24, quantised to 0.01
+    assert a["dataset"]["holdout_bars"] == 120
