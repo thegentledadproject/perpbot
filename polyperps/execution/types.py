@@ -144,6 +144,9 @@ class DecisionRow:
     client_order_id: str | None = None
     note: str = ""
 
+    def __post_init__(self) -> None:
+        _require_aware(self)
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class OrderRow:
@@ -161,6 +164,9 @@ class OrderRow:
     updated_at: datetime
     reason: str
 
+    def __post_init__(self) -> None:
+        _require_aware(self)
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class PositionLocalRow:
@@ -173,3 +179,6 @@ class PositionLocalRow:
     stop_order_id: str | None
     cumulative_funding: Decimal
     updated_at: datetime
+
+    def __post_init__(self) -> None:
+        _require_aware(self)

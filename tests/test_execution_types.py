@@ -4,7 +4,7 @@ from decimal import Decimal
 import pytest
 
 from polyperps.execution.types import (
-    AccountSnapshot, FillUpdate, Intent, OrderAck, OrderRequest, PositionView, State,
+    AccountSnapshot, DecisionRow, FillUpdate, Intent, OrderAck, OrderRequest, PositionView, State,
 )
 
 T0 = datetime(2026, 9, 12, 12, 0, tzinfo=timezone.utc)
@@ -44,3 +44,9 @@ def test_frozen_kw_only():
 def test_intent_defaults():
     i = Intent(instrument_id=6, side="sell", quantity=Decimal("0.5"), notional=Decimal(50))
     assert i.reduce_only is False and i.reason == "strategy"
+
+
+def test_row_datetimes_must_be_utc():
+    with pytest.raises(ValueError):
+        DecisionRow(run_id="run1", instrument_id=6, seq=1, ts=datetime(2026, 9, 12, 12, 0),
+                    state_before=State.FLAT, target=None)
