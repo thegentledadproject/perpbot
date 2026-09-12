@@ -182,3 +182,8 @@ class PositionLocalRow:
 
     def __post_init__(self) -> None:
         _require_aware(self)
+
+
+@dataclass(frozen=True, slots=True)
+class ReconcileNow:
+    reason: str = ""

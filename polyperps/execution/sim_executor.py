@@ -63,6 +63,7 @@ class SimExecutor:
         self._queue: asyncio.Queue[OrderUpdate | FillUpdate] = asyncio.Queue()
         self._n = 0
         self.fail_next: Literal["timeout", "reject"] | None = None
+        self.fail_queue: list[Literal["timeout", "reject", "drop"]] = []
         self.heartbeat_count = 0
 
     # --- market data in ---------------------------------------------------
@@ -81,7 +82,12 @@ class SimExecutor:
     # --- executor protocol ------------------------------------------------
     async def submit(self, order: OrderRequest) -> OrderAck:
         now = self._clock()
-        mode, self.fail_next = self.fail_next, None
+        if self.fail_queue:
+            mode = self.fail_queue.pop(0)
+        else:
+            mode, self.fail_next = self.fail_next, None
+        if mode == "drop":
+            raise ExecutorTimeout(f"sim: injected drop for {order.client_order_id}")
         if mode == "reject":
             return OrderAck(client_order_id=order.client_order_id, exchange_order_id=None, status="rejected",
                             reason="sim: injected reject", ts=now)
@@ -138,6 +144,10 @@ class SimExecutor:
         self._save()
         return StopAck(instrument_id=instrument_id, trigger_price=trigger_price,
                        exchange_order_id=f"sim-stop-{instrument_id}", ts=self._clock())
+
+    async def cancel_stop(self, instrument_id: int) -> None:
+        self._stops.pop(instrument_id, None)
+        self._save()
 
     def check_triggers(self) -> list[FillUpdate]:
         """Fire stops against current marks. Callable with the router stopped."""
