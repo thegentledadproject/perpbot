@@ -30,6 +30,7 @@ from polyperps.risk.portfolio_exposure import EXPOSURE, ExposureLimits, vet_expo
 from polyperps.storage import db
 
 _Q = Decimal("0.00000001")
+_TERMINAL_ORDER_STATUSES = frozenset({"filled", "cancelled", "auto_cancelled", "rejected", "lost"})
 
 
 def _utcnow() -> datetime:
@@ -82,6 +83,17 @@ class InstrumentRouter:
     def load_local(self, row: PositionLocalRow) -> None:
         self.state, self.size, self.entry = row.state, row.size, row.entry_price
         self.stop_trigger, self.cumulative_funding = row.stop_trigger, row.cumulative_funding
+        # Reseed the two counters from the persisted rows so a restart on the same run_id
+        # neither collides on the decisions primary key nor reissues a client_order_id.
+        self._dseq = max((d.seq for d in db.list_decisions(self.conn, self.run_id, self.instrument_id)), default=0)
+        nums: list[int] = []
+        for o in db.list_orders(self.conn, self.run_id):
+            if o.instrument_id != self.instrument_id:
+                continue
+            tail = o.client_order_id.rsplit("-", 1)[-1]
+            if tail.isdigit():
+                nums.append(int(tail))
+        self.seq = max(nums, default=0)
 
     def _persist(self) -> None:
         db.upsert_position_local(self.conn, PositionLocalRow(
@@ -180,10 +192,15 @@ class InstrumentRouter:
         prior = self.state
         self._pending_cid = cid
         self._set_state(State.EXIT_PENDING if intent.reduce_only else State.ENTRY_PENDING)
+        # Captured before the await: with a live executor, the event pump can apply this same
+        # order's WS fill through handle_event() (updating self.size) while we're still waiting
+        # on the REST ack, so anything computed from self.size after the await would be racy.
+        size_before = self.size
         req = OrderRequest(client_order_id=cid, instrument_id=self.instrument_id, side=intent.side,
                            quantity=intent.quantity, reduce_only=intent.reduce_only, ts=now)
-        ack = await self._submit_with_recovery(req)
+        ack = await self._submit_with_recovery(req, size_before)
         if ack is None:
+            self._update_order(cid, status="lost", reason="no ack after timeout and retry")
             await self.halt("order lost after timeout and retry")
             return
         if ack.status == "rejected":
@@ -192,16 +209,19 @@ class InstrumentRouter:
             self._pending_cid = None
             self._set_state(prior)
             return
+        # skip_if_terminal: if the event pump already raced this fill through handle_event()
+        # (see size_before above), the row is already "filled" - don't downgrade it back to
+        # "accepted".
         self._update_order(cid, status="accepted", exchange_order_id=ack.exchange_order_id,
-                           reason=ack.reason or intent.reason)
+                           reason=ack.reason or intent.reason, skip_if_terminal=True)
 
-    async def _submit_with_recovery(self, req: OrderRequest) -> OrderAck | None:
+    async def _submit_with_recovery(self, req: OrderRequest, size_before: Decimal) -> OrderAck | None:
         for attempt in (1, 2):
             try:
                 return await asyncio.wait_for(self.executor.submit(req), self.ack_timeout_s)
             except (asyncio.TimeoutError, ExecutorTimeout):
                 snap = await self.executor.snapshot()
-                if self._landed(req, snap):
+                if self._landed(req, snap, size_before):
                     self._alert("WARN", "ack_lost", client_order_id=req.client_order_id, attempt=attempt)
                     return OrderAck(client_order_id=req.client_order_id, exchange_order_id=None, status="accepted",
                                     reason="adopted after timeout", ts=self.clock())
@@ -209,17 +229,19 @@ class InstrumentRouter:
                     self._alert("WARN", "retry", client_order_id=req.client_order_id)
         return None
 
-    def _landed(self, req: OrderRequest, snap: AccountSnapshot) -> bool:
+    def _landed(self, req: OrderRequest, snap: AccountSnapshot, size_before: Decimal) -> bool:
         if req.client_order_id in snap.open_orders:
             return True
         delta = req.quantity if req.side == "buy" else -req.quantity
         pos = snap.position(self.instrument_id)
         actual = pos.size if pos is not None else Decimal(0)
-        return actual == self.size + delta
+        return actual == size_before + delta
 
-    def _update_order(self, cid: str, **changes) -> None:
+    def _update_order(self, cid: str, *, skip_if_terminal: bool = False, **changes) -> None:
         row = db.get_order(self.conn, cid)
         if row is None:
+            return
+        if skip_if_terminal and row.status in _TERMINAL_ORDER_STATUSES:
             return
         db.upsert_order(self.conn, replace(row, **changes, updated_at=self.clock()))
 
@@ -236,6 +258,7 @@ class InstrumentRouter:
             return
         if ev.instrument_id != self.instrument_id:
             return
+        size_before = self.size
         ours = db.get_order(self.conn, ev.client_order_id) is not None
         self._apply_fill(ev)
         if ours:
@@ -256,6 +279,15 @@ class InstrumentRouter:
                 hook()
             if not was_pending and not ours:
                 self._alert("WARN", "stop_fired", price=ev.price, quantity=ev.quantity)
+        else:
+            # Neither "our pending entry landed" nor "flattened" - a fill we weren't tracking
+            # (e.g. one that arrives after clear_halt(), or for an id we never sent). Surface it
+            # rather than silently leaving positions_local out of step with the size we just applied.
+            self._alert("WARN", "unexpected_fill", client_order_id=ev.client_order_id, state=self.state.value,
+                        size_before=size_before, size_after=self.size)
+            if self.state is State.FLAT:
+                self._set_state(State.OPEN)
+                await self.replace_stop()
 
     def _apply_fill(self, ev: FillUpdate) -> None:
         delta = ev.quantity if ev.side == "buy" else -ev.quantity

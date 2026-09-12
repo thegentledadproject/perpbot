@@ -4,7 +4,7 @@ from decimal import Decimal
 from polyperps.backtest.bars import Bar
 from polyperps.execution.order_router import InstrumentRouter, Portfolio, apply_guards
 from polyperps.execution.sim_executor import SimExecutor
-from polyperps.execution.types import Intent, OrderRequest, State
+from polyperps.execution.types import AccountSnapshot, FillUpdate, Intent, OrderRequest, State
 from polyperps.exchange.types import SourceType
 from polyperps.monitor.alerts import Alerter, SqliteSink
 from polyperps.monitor.decision_trail import reconstruct
@@ -46,6 +46,22 @@ class Ticker:
     def __call__(self):
         self.n += 1
         return self.start + self.n * self.step
+
+
+class RacyExecutor(SimExecutor):
+    """Simulates a live executor whose event pump beats the REST ack: the FIRST call to
+    snapshot() (the one _submit_with_recovery makes after a timeout) drains the sim's queued
+    events and dispatches them straight to `router.handle_event` before returning the snapshot -
+    so by the time _landed() runs, the router has already applied the fill on its own."""
+    router = None  # set after the router is constructed
+    _raced = False
+
+    async def snapshot(self):
+        if not self._raced and self.router is not None:
+            self._raced = True
+            for ev in self.drain_events():
+                await self.router.handle_event(ev)
+        return await super().snapshot()
 
 
 def make(target=1, equity="1000", clock=lambda: T0):
@@ -152,6 +168,7 @@ async def test_dropped_twice_halts():
     await pf.on_bar({6: [bar(0)]}, "run")
     assert router.state is State.HALTED and (await ex.snapshot()).position(6) is None
     assert [a for a in list_alerts(conn, "r") if a[1] == "CRITICAL"]
+    assert get_order(conn, "r-6-1").status == "lost"
     await pf.on_bar({6: [bar(0), bar(1)]}, "run")            # halted: no new orders
     assert get_order(conn, "r-6-2") is None
     router.clear_halt()
@@ -210,3 +227,58 @@ async def test_decision_trail_reconstructable_from_sqlite_only():
     trail = reconstruct(conn, "r", 6)
     assert [e.kind for e in trail][:3] == ["decision", "order", "alert"]      # decision -> fill -> stop_placed
     assert any("r-6-2" in e.summary and "filled" in e.summary for e in trail)
+
+
+# --- review fix round 1 -------------------------------------------------------------
+
+
+async def test_timeout_race_snapshot_adopts_without_double_apply():
+    """A live executor's event pump can apply this order's own fill (via handle_event) before
+    the timed-out submit's snapshot() returns. _landed must still compare against the size the
+    router had *before* the send (not whatever the race already mutated it to), and the
+    subsequent 'accepted' write must not downgrade the 'filled' row the race already wrote."""
+    conn = connect(":memory:")
+    ex = RacyExecutor("r", equity=Decimal(1000), taker_fee_rate=FEE, clock=lambda: T0)
+    ex.update_mark(6, Decimal(100)); ex.update_mark(7, Decimal(100))
+    alerter = Alerter("r", [SqliteSink(conn)])
+    strat = Strat(1)
+    router = InstrumentRouter(run_id="r", instrument_id=6, category="crypto", strategy=strat, executor=ex, conn=conn,
+                              alerter=alerter, categories=CATS, clock=lambda: T0)
+    ex.router = router
+    ex.fail_next = "timeout"
+    snap0 = AccountSnapshot(equity=Decimal(1000), positions=(), open_orders=(), stops={}, in_liquidation=False, ts=T0)
+    await router.on_bar([bar(0)], snap0, "run")
+    assert router.state is State.OPEN and router.size == 1
+    assert (await ex.snapshot()).position(6).size == 1        # exactly one fill, not doubled by a spurious retry
+    assert get_order(conn, "r-6-1").status == "filled"         # not downgraded back to "accepted"
+    assert "ack_lost" in kinds(conn)
+
+
+async def test_unexpected_fill_while_flat_recovers_to_open():
+    conn, ex, strat, router, pf = make()
+    assert router.state is State.FLAT
+    fill = FillUpdate(client_order_id="foreign-1", instrument_id=6, side="buy", quantity=Decimal(1),
+                      price=Decimal("100.08"), fee=Decimal("0.04"), ts=T0)
+    await router.handle_event(fill)
+    assert router.state is State.OPEN and router.size == 1
+    assert "unexpected_fill" in kinds(conn) and "stop_placed" in kinds(conn)
+
+
+async def test_load_local_restores_seq_counters_across_restart():
+    conn, ex, strat, router, pf = make()
+    await pf.on_bar({6: [bar(0)]}, "run"); await pump(pf, ex)
+    assert router.state is State.OPEN and get_order(conn, "r-6-1") is not None
+    row = get_positions_local(conn, "r")[6]
+
+    alerter2 = Alerter("r", [SqliteSink(conn)])
+    strat2 = Strat(0)
+    router2 = InstrumentRouter(run_id="r", instrument_id=6, category="crypto", strategy=strat2, executor=ex, conn=conn,
+                               alerter=alerter2, categories=CATS, clock=lambda: T0)
+    router2.load_local(row)
+    assert router2.state is State.OPEN and router2.size == 1
+    assert router2.seq == 1 and router2._dseq == 1
+
+    pf2 = Portfolio(run_id="r", executor=ex, conn=conn, alerter=alerter2, routers={6: router2})
+    await pf2.on_bar({6: [bar(0), bar(1)]}, "run")     # target 0 -> exit decision; must not collide on seq
+    assert router2.state is State.EXIT_PENDING
+    assert get_order(conn, "r-6-2") is not None
