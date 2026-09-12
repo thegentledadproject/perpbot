@@ -322,6 +322,15 @@ class InstrumentRouter:
     def clear_halt(self) -> None:
         self._set_state(State.OPEN if self.size != 0 else State.FLAT)
 
+    def adopt_pending(self, client_order_id: str, state: State) -> None:
+        """Recovery: an in-flight order is still resting on the venue. Restore the
+        pending-order bookkeeping so its eventual fill/cancel lands through the normal
+        _pending_cid path instead of the unexpected_fill branch."""
+        if state not in (State.ENTRY_PENDING, State.EXIT_PENDING):
+            raise ValueError(f"adopt_pending: state must be ENTRY_PENDING or EXIT_PENDING, got {state}")
+        self._pending_cid = client_order_id
+        self._set_state(state)
+
 
 class Portfolio:
     def __init__(self, *, run_id: str, executor: Executor, conn, alerter: Alerter,
