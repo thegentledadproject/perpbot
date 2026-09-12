@@ -79,6 +79,7 @@ class Bar:
     index_close: Decimal | None   # native only: last tick's index_price in the hour; None on proxy
     funding_rate: Decimal | None  # the rate settled at open_ts + 1h; None if missing
     spread_bps: Decimal           # median (ask-bid)/mid from book_snapshots in the hour; proxy uses PROXY_SPREAD_BPS (pre-registered constant, 5 bps, flagged as assumption)
+    spread_source: Literal["book", "constant"]  # "book" when computed from snapshots, else "constant"; BacktestResult.bars_constant_spread counts the latter and the run record carries it (added 2026-09-12)
     complete: bool                # False if the candle or funding row is missing
 ```
 - `build_bars(conn, instrument_id, source_type, start, end) -> list[Bar]` — one bar per hour in `[start, end)`, incomplete bars present (not dropped) so the harness can see gaps.

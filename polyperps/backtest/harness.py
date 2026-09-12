@@ -43,6 +43,7 @@ class BacktestResult:
     params: dict[str, str] = field(default_factory=dict)
     bars_total: int = 0
     bars_complete: int = 0
+    bars_constant_spread: int = 0  # bars whose spread came from the constant fallback, not the book
     fills: int = 0
     fills_unavailable: int = 0
     fills_at_hourly_open: int = 0
@@ -91,6 +92,7 @@ def run_backtest(
                 "strategy": strategy.name, **{k: str(v) for k, v in strategy.params.items()}},
         bars_total=len(bars),
         bars_complete=sum(1 for b in bars if b.complete),
+        bars_constant_spread=sum(1 for b in bars if b.spread_source == "constant"),
     )
     book = _Book(notional)
     latency = timedelta(seconds=latency_s)

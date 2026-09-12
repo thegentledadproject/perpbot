@@ -61,7 +61,16 @@ def test_build_bars_native_complete_bar():
     assert b.complete is True and b.close == Decimal("100") and b.funding_rate == Decimal("0.0002")
     assert b.index_close == Decimal("100.9")
     assert b.spread_bps == Decimal("60")  # median of 100 and 20
+    assert b.spread_source == "book"
     assert b.source_type is NATIVE
+
+
+def test_build_bars_native_without_snapshots_labels_spread_constant():
+    conn = connect(":memory:")
+    insert_candle(conn, candle(T0, NATIVE))
+    insert_funding(conn, funding(T0 + H, NATIVE))
+    (b,) = build_bars(conn, 6, NATIVE, start=T0, end=T0 + H)
+    assert b.complete and b.spread_bps == Decimal("5") and b.spread_source == "constant"
 
 
 def test_build_bars_marks_incomplete_when_candle_or_funding_missing():
@@ -89,6 +98,7 @@ def test_build_bars_proxy_uses_constant_spread_and_no_index():
     insert_tick(conn, tick(T0 + timedelta(minutes=10)))  # native tick must be ignored for proxy bars
     (b,) = build_bars(conn, 6, PROXY, start=T0, end=T0 + H, proxy_spread_bps=Decimal("7"))
     assert b.complete and b.index_close is None and b.spread_bps == Decimal("7")
+    assert b.spread_source == "constant"
 
 
 def test_build_bars_range_is_hour_aligned_and_end_exclusive():
@@ -103,7 +113,7 @@ def test_build_bars_range_is_hour_aligned_and_end_exclusive():
 def test_align_pair_keeps_only_hours_complete_in_both():
     mk = lambda ts, st, complete: Bar(instrument_id=6, source_type=st, open_ts=ts, open=Decimal(1), high=Decimal(1),
                                       low=Decimal(1), close=Decimal(1), index_close=None, funding_rate=Decimal(0),
-                                      spread_bps=Decimal(5), complete=complete)
+                                      spread_bps=Decimal(5), spread_source="constant", complete=complete)
     native = [mk(T0, NATIVE, True), mk(T0 + H, NATIVE, False), mk(T0 + 2 * H, NATIVE, True)]
     proxy = [mk(T0, PROXY, True), mk(T0 + H, PROXY, True), mk(T0 + 3 * H, PROXY, True)]
     pairs = align_pair(native, proxy)

@@ -48,6 +48,7 @@ def _stats(res, *, bootstrap: bool, seed: int) -> dict:
         "fills": res.fills,
         "fills_unavailable": res.fills_unavailable,
         "fills_at_hourly_open": res.fills_at_hourly_open,
+        "bars_constant_spread": res.bars_constant_spread,
         "final_equity": str(res.equity[-1][1]) if res.equity else "0",
     }
     if bootstrap:

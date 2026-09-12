@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 from statistics import median
+from typing import Literal
 
 from polyperps.exchange.types import SourceType
 from polyperps.signal.sufficiency import BAR, NATIVE_SOURCES
@@ -32,6 +33,7 @@ class Bar:
     index_close: Decimal | None
     funding_rate: Decimal | None
     spread_bps: Decimal
+    spread_source: Literal["book", "constant"]  # "book" = median of stored snapshots; "constant" = pre-registered fallback
     complete: bool
 
 
@@ -88,11 +90,11 @@ def build_bars(
     while open_ts <= last_open:
         c = candles.get(open_ts)
         rate = funding.get(open_ts + HOUR)
-        if native:
-            spreads = spreads_by_hour.get(open_ts)
-            spread = median(spreads) if spreads else proxy_spread_bps
+        spreads = spreads_by_hour.get(open_ts) if native else None
+        if spreads:
+            spread, spread_source = median(spreads), "book"
         else:
-            spread = proxy_spread_bps
+            spread, spread_source = proxy_spread_bps, "constant"
         bars.append(
             Bar(
                 instrument_id=instrument_id,
@@ -105,6 +107,7 @@ def build_bars(
                 index_close=index_by_hour.get(open_ts) if native else None,
                 funding_rate=rate,
                 spread_bps=spread,
+                spread_source=spread_source,
                 complete=c is not None and rate is not None,
             )
         )

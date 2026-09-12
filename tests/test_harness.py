@@ -18,7 +18,7 @@ def bar(i, close="100", funding="0", complete=True):
     c = Decimal(close) if complete else None
     return Bar(instrument_id=6, source_type=SourceType.POLYMARKET_REST, open_ts=ts, open=c, high=c, low=c,
                close=c, index_close=None, funding_rate=Decimal(funding) if complete else None,
-               spread_bps=Decimal("10"), complete=complete)
+               spread_bps=Decimal("10"), spread_source="constant", complete=complete)
 
 
 def minutes(bars, price_by_hour=None):
@@ -145,6 +145,12 @@ def test_gap_scenario_runs_without_error_when_strategy_lacks_on_flatten():
     bars = [bar(0), bar(1), bar(2), bar(3, complete=False), bar(4), bar(5)]
     res = run_backtest(bars, Const(1), minute_closes=minutes(bars), taker_fee_rate=Decimal(0), warmup=0)
     assert res.bars_complete == 5
+
+
+def test_result_counts_bars_with_constant_spread():
+    bars = [bar(0), replace(bar(1), spread_source="book"), bar(2), replace(bar(3), spread_source="book")]
+    res = run_backtest(bars, Const(0), minute_closes=minutes(bars), taker_fee_rate=FEE, warmup=0)
+    assert res.bars_total == 4 and res.bars_constant_spread == 2
 
 
 def test_equity_and_returns_track_price():

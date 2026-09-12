@@ -88,6 +88,8 @@ def test_run_backtest_h1_native_appends_one_record(tmp_path, monkeypatch):
     holdout = record["holdout"]
     assert "sharpe" in holdout
     assert "fills_at_hourly_open" in holdout
+    # no book snapshots seeded -> every bar of the holdout input (warm-up tail + holdout) is constant
+    assert holdout["bars_constant_spread"] == holdout["n"] + 1 + record["params_chosen"]["lookback"]
     assert holdout["fills_at_hourly_open"] == holdout["fills"]  # no 1m candles seeded
     assert holdout["ci_lo"] is not None and holdout["ci_hi"] is not None  # >=48 holdout returns
 

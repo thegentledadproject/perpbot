@@ -21,7 +21,7 @@ def bar(i, close="100", funding="0", index=None, st=SourceType.POLYMARKET_REST):
     ts = T0 + i * H
     return Bar(instrument_id=6, source_type=st, open_ts=ts, open=Decimal(close), high=Decimal(close),
                low=Decimal(close), close=Decimal(close), index_close=Decimal(index) if index else None,
-               funding_rate=Decimal(funding), spread_bps=Decimal("5"), complete=True)
+               funding_rate=Decimal(funding), spread_bps=Decimal("5"), spread_source="constant", complete=True)
 
 
 def minutes(bars):
