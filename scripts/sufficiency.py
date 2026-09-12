@@ -2,8 +2,9 @@
 
     POLYPERPS_INSTRUMENT_IDS=6,7 .venv/Scripts/python scripts/sufficiency.py
 
-Native data cannot meet the Strict bar before ~2026-11-02 (perps launched
-2026-09-03). Run monthly (see docs/ops/eligibility-checklist.md). No network.
+Native data cannot meet the Strict bar before ~2026-10-11 (60 days after the
+first stored native funding row, 2026-08-12; re-check with this script). Run
+monthly (see docs/ops/eligibility-checklist.md). No network.
 """
 
 from __future__ import annotations

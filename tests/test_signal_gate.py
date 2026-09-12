@@ -61,6 +61,11 @@ def test_no_approver_is_false(tmp_path):
     assert load_validated(validated_path=val, log_path=log) is False
 
 
+def test_whitespace_only_approver_is_false(tmp_path):
+    log, val = _files(tmp_path, record=PASSING, validated={**APPROVAL, "approved_by": "  \n"})
+    assert load_validated(validated_path=val, log_path=log) is False
+
+
 def test_malformed_json_is_false_not_exception(tmp_path):
     log, val = _files(tmp_path, record=PASSING)
     val.write_text("{not json", encoding="utf-8")

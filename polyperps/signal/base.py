@@ -34,9 +34,12 @@ def load_validated(*, validated_path: Path = VALIDATED_PATH, log_path: Path = LO
         approval = json.loads(validated_path.read_text(encoding="utf-8"))
         if not isinstance(approval, dict):
             return False
-        run_id = approval.get("run_id")
-        if not all(isinstance(approval.get(k), str) and approval.get(k) for k in ("run_id", "approved_by", "approved_at")):
+        if not all(
+            isinstance(approval.get(k), str) and approval.get(k).strip()
+            for k in ("run_id", "approved_by", "approved_at")
+        ):
             return False
+        run_id = approval["run_id"].strip()
         return any(r.get("run_id") == run_id and r.get("passed") is True for r in read_records(path=log_path))
     except Exception as exc:  # never crash an import over the gate file
         log.warning("validated.json unreadable (%s); SIGNAL_VALIDATED stays False", type(exc).__name__)

@@ -15,7 +15,7 @@ Phase 1 produces code (a backtest harness, data ingest, three strategies, a suff
 
 | Decision | Choice | Consequence |
 |---|---|---|
-| Sufficiency bar (spec 1.0) | **Strict** — see §7 | Native data cannot meet it before ~2 Nov 2026 (perps launched 2026-09-03). Phase 1 code is built and validated now; hypotheses are *screened* on proxy data; the bar is re-checked on a schedule. |
+| Sufficiency bar (spec 1.0) | **Strict** — see §7 | Native data cannot meet it before ~2026-10-11 (60 days after the first stored native funding row, 2026-08-12; re-check with `scripts/sufficiency.py`). Correction: this table originally assumed perps launched 2026-09-03, giving ~2 Nov 2026 — the exchange in fact serves native history from 2026-08-12, so the 60-day mark falls about three weeks earlier than first estimated. Phase 1 code is built and validated now; hypotheses are *screened* on proxy data; the bar is re-checked on a schedule. |
 | Proxy venue (spec 1.1) | **Hyperliquid only** | Public `/info` API, no key, no read geo-block, years of BTC/ETH funding + candles. Also the comparator for H2. `SourceType.PROXY_HYPERLIQUID`. |
 | Hypotheses (spec 1.2) | **All three** from the parent spec | H1 funding mean reversion, H2 cross-venue basis, H3 mark-vs-index lag. |
 | Harness architecture | **A: hourly funding-period bars, event-driven** | Point-in-time discipline is structural (strategy receives `bars[:t+1]`). Same code runs on native and proxy bars. Tick-level replay (B) rejected: no proxy ticks exist. Vectorised (C) rejected: look-ahead is one missing shift away. |
@@ -154,7 +154,7 @@ BAR = SufficiencyBar(
 ```
 - A test asserts every field's value. Changing any number is a visible test change and a logged spec amendment.
 - `check_dataset(conn, instrument_id, source_type, *, now) -> SufficiencyReport(met: bool, days: Decimal, funding_periods: int, shortfall: dict[str, str])`.
-- `scripts/sufficiency.py` prints the report per configured instrument for both sources. The eligibility checklist gains a row: "re-run `scripts/sufficiency.py`; earliest possible native pass ≈ 2026-11-02".
+- `scripts/sufficiency.py` prints the report per configured instrument for both sources. The eligibility checklist gains a row: "re-run `scripts/sufficiency.py`; earliest possible native pass ≈ 2026-10-11 (60 days after the first stored native funding row, 2026-08-12)".
 
 ## 8. Validation log and the gate (Phase 1 gate in the parent spec)
 
@@ -213,4 +213,4 @@ Kelly sizing, liquidation guard, order routing, reconciliation (Phase 2); kill t
 
 ## 12. Timeline reality
 
-Hyperliquid screening can run immediately after the harness lands. Native confirmation of any hypothesis is impossible before ~2026-11-02 under the Strict bar; the checklist row makes the re-check routine rather than remembered.
+Hyperliquid screening can run immediately after the harness lands. Native confirmation of any hypothesis is impossible before ~2026-10-11 under the Strict bar (60 days after the first stored native funding row, 2026-08-12 — not 2026-09-03 as §2 originally assumed); the checklist row makes the re-check routine rather than remembered.
