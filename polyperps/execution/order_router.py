@@ -17,6 +17,7 @@ from typing import Literal
 from polyperps.backtest.bars import Bar
 from polyperps.backtest.strategy import Strategy, clamp_target
 from polyperps.execution.executor import Executor, ExecutorTimeout
+from polyperps.execution.reconciliation import Mismatch, diff
 from polyperps.execution.types import (
     AccountSnapshot, DecisionRow, FillUpdate, Intent, OrderAck, OrderRequest, OrderRow, OrderUpdate,
     PositionLocalRow, ReconcileNow, State,
@@ -326,7 +327,7 @@ class Portfolio:
                  reconcile: Callable[[], Awaitable[None]] | None = None) -> None:
         self.run_id, self.executor, self.conn, self.alerter = run_id, executor, conn, alerter
         self.routers = dict(routers)
-        self.reconcile = reconcile
+        self.reconcile = reconcile if reconcile is not None else self.reconcile_now
 
     async def on_bar(self, histories: Mapping[int, Sequence[Bar]], kill: Action) -> None:
         snapshot = await self.executor.snapshot()
@@ -358,3 +359,38 @@ class Portfolio:
     async def run_event_pump(self) -> None:
         async for ev in self.executor.events():
             await self.dispatch(ev)
+
+    async def reconcile_now(self) -> list[Mismatch]:
+        snapshot = await self.executor.snapshot()
+        local = db.get_positions_local(self.conn, self.run_id)
+        # "known_orders" is what diff() treats as ours-and-possibly-still-resting on the venue.
+        # Terminal rows (filled/cancelled/auto_cancelled/rejected/lost) are done as far as we're
+        # concerned; if the venue still lists one as open that's a genuine unknown_order mismatch
+        # worth raising, not something to mask by including every order id we've ever sent.
+        known = {o.client_order_id for o in db.list_orders(self.conn, self.run_id)
+                if o.status not in _TERMINAL_ORDER_STATUSES}
+        mismatches = diff(local=local, remote=snapshot, run_id=self.run_id, known_orders=known)
+        for m in mismatches:
+            router = self.routers.get(m.instrument_id) if m.instrument_id is not None else None
+            detail = {"local": m.local, "remote": m.remote}
+            now = _utcnow()
+            if m.kind == "size":
+                if router is not None:
+                    await router.halt(f"reconcile: size mismatch local={m.local} remote={m.remote}")
+                else:
+                    self.alerter.emit(Alert(level="CRITICAL", kind="unknown_position", instrument_id=m.instrument_id,
+                                            detail=detail, ts=now))
+            elif m.kind == "unknown_order":
+                await self.executor.cancel(m.remote)
+                self.alerter.emit(Alert(level="WARN", kind="unknown_order", instrument_id=None, detail=detail, ts=now))
+            elif m.kind == "missing_stop":
+                if router is not None:
+                    await router.replace_stop()
+                self.alerter.emit(Alert(level="WARN", kind="stop_missing", instrument_id=m.instrument_id, detail=detail, ts=now))
+            elif m.kind == "stop_without_position":
+                await self.executor.cancel_stop(m.instrument_id)
+                self.alerter.emit(Alert(level="INFO", kind="stop_orphan_cancelled", instrument_id=m.instrument_id,
+                                        detail=detail, ts=now))
+            else:
+                self.alerter.emit(Alert(level="WARN", kind="stop_drift", instrument_id=m.instrument_id, detail=detail, ts=now))
+        return mismatches
