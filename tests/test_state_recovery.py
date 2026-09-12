@@ -129,6 +129,8 @@ async def test_adopted_resting_order_keeps_pending_bookkeeping():
     rep = await recover(conn=conn, run_id="r", executor=ex, routers={6: router}, alerter=alerter, clock=lambda: T0)
     assert rep.adopted == ["r-6-1"]
     assert router.state is State.ENTRY_PENDING and router._pending_cid == "r-6-1"
+    assert rep.states[6] == "ENTRY_PENDING"
+    assert list_recovery(conn, "r")[0][1]["states"] == {"6": "ENTRY_PENDING"}
 
     await router.handle_event(FillUpdate(client_order_id="r-6-1", instrument_id=6, side="buy", quantity=Decimal(1),
                                          price=Decimal("100.08"), fee=Decimal("0.04"), ts=T0))

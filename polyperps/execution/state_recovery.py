@@ -112,6 +112,11 @@ async def recover(
             if not oid.startswith(prefix):
                 await executor.cancel(oid)
                 rep.cancelled.append(oid)
+
+        # adopt_pending() (in the order loop above) can move a router past the state the
+        # per-router loop recorded (e.g. FLAT -> ENTRY_PENDING for a still-resting order), so
+        # re-derive from the routers themselves rather than trust the earlier snapshot.
+        rep.states = {iid: r.state.value for iid, r in routers.items()}
     except Exception as exc:
         rep.failed = f"{type(exc).__name__}: {exc}"
         db.insert_recovery(conn, run_id=run_id, ts=clock(), findings_json=json.dumps(rep.to_dict()))
