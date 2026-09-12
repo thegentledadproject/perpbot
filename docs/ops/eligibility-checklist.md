@@ -29,4 +29,4 @@ announcement. Record each pass in the log table. This is never "done".
 
 | Date | Egress IP / region | Terms date | SDK ver | Result | Notes |
 |------|--------------------|------------|---------|--------|-------|
-|      |                    |            |         |        |       |
+| 2026-09-12 | Home ISP (Malaysia); egress IP not recorded — see note | not re-read | 0.10.0 | **FAIL (geo)** | All Polymarket hosts (`api.perpetuals`, `clob`, `gamma-api`) timed out; `api.perpetuals.polymarket.com` resolved to 175.139.142.25 (Malaysian ISP range, not Polymarket) — consistent with an ISP-level DNS sinkhole. Hyperliquid and general internet fine. The same calls succeeded earlier the same day (feed run, fee fetch, 2-day backfill), so the working path differs from this one (VPN / other connection / intermittent poisoning). Backfill of instrument 7 not done. Action: only run Polymarket-facing scripts from the path that worked; treat this as the geo-restriction the parent spec warned about and confirm eligibility from the intended EC2 egress before Phase 3. |
