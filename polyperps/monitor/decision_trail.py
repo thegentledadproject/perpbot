@@ -6,6 +6,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
 
+from polyperps.exchange.types import _require_aware
 from polyperps.storage import db
 
 _ORDER = {"recovery": 3, "decision": 0, "order": 1, "alert": 2}
@@ -18,6 +19,9 @@ class TrailEvent:
     instrument_id: int | None
     summary: str
     data: dict
+
+    def __post_init__(self) -> None:
+        _require_aware(self)
 
 
 def reconstruct(conn: sqlite3.Connection, run_id: str, instrument_id: int) -> list[TrailEvent]:

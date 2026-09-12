@@ -13,6 +13,7 @@ from typing import Literal, Protocol
 
 import httpx
 
+from polyperps.exchange.types import _require_aware
 from polyperps.storage import db
 
 Level = Literal["INFO", "WARN", "CRITICAL"]
@@ -26,6 +27,9 @@ class Alert:
     instrument_id: int | None
     detail: dict
     ts: datetime
+
+    def __post_init__(self) -> None:
+        _require_aware(self)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

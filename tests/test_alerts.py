@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 import httpx
+import pytest
 
 from polyperps.monitor.alerts import (
     ALERT_THRESHOLDS, Alert, Alerter, AlertThresholds, LogSink, SqliteSink, TelegramSink,
@@ -71,3 +72,8 @@ def test_alerter_swallows_sink_errors():
             raise RuntimeError("sink down")
 
     Alerter("run1", [Boom()]).emit(Alert(level="INFO", kind="x", instrument_id=None, detail={}, ts=T0))
+
+
+def test_alert_rejects_naive_datetime():
+    with pytest.raises(ValueError):
+        Alert(level="INFO", kind="x", instrument_id=None, detail={}, ts=datetime(2026, 9, 12, 12, 0))
