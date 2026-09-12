@@ -89,26 +89,28 @@ class SimExecutor:
         if order.reduce_only and (p.size == 0 or (p.size > 0) == (order.side == "buy")):
             return OrderAck(client_order_id=order.client_order_id, exchange_order_id=None, status="rejected",
                             reason="reduce_only order would open or increase a position", ts=now)
+        fill_qty = min(order.quantity, abs(p.size)) if order.reduce_only else order.quantity
         self._n += 1
         xid = f"sim-{self._n}"
-        fill = self._fill(order, now)
+        fill = self._fill(order, now, fill_qty)
         self._queue.put_nowait(OrderUpdate(client_order_id=order.client_order_id, status="filled",
-                                           filled_quantity=order.quantity, ts=now))
+                                           filled_quantity=fill_qty, ts=now))
         self._queue.put_nowait(fill)
         self._save()
         if mode == "timeout":
             raise ExecutorTimeout(f"sim: injected timeout for {order.client_order_id}")
         return OrderAck(client_order_id=order.client_order_id, exchange_order_id=xid, status="accepted", reason="", ts=now)
 
-    def _fill(self, order: OrderRequest, now: datetime) -> FillUpdate:
+    def _fill(self, order: OrderRequest, now: datetime, quantity: Decimal | None = None) -> FillUpdate:
+        qty = order.quantity if quantity is None else quantity
         mark = self._marks[order.instrument_id]
         s = Decimal(1) if order.side == "buy" else Decimal(-1)
         price = (mark * (1 + s * self._slip)).quantize(_P, rounding=ROUND_HALF_EVEN)
-        fee = order.quantity * price * self._fee
+        fee = qty * price * self._fee
         self._cash -= fee
-        self._apply_position(order.instrument_id, s * order.quantity, price)
+        self._apply_position(order.instrument_id, s * qty, price)
         return FillUpdate(client_order_id=order.client_order_id, instrument_id=order.instrument_id, side=order.side,
-                          quantity=order.quantity, price=price, fee=fee, ts=now)
+                          quantity=qty, price=price, fee=fee, ts=now)
 
     def _apply_position(self, iid: int, delta: Decimal, price: Decimal) -> None:
         p = self._pos.setdefault(iid, _Pos())
@@ -202,6 +204,7 @@ class SimExecutor:
             "positions": {str(i): {"size": str(p.size), "entry": str(p.entry), "funding": str(p.funding)}
                           for i, p in self._pos.items() if p.size != 0},
             "stops": {str(i): str(t) for i, t in self._stops.items()},
+            "marks": {str(i): str(m) for i, m in self._marks.items()},
         })
 
     @classmethod
@@ -212,6 +215,7 @@ class SimExecutor:
         for i, p in d["positions"].items():
             ex._pos[int(i)] = _Pos(Decimal(p["size"]), Decimal(p["entry"]), Decimal(p["funding"]))
         ex._stops = {int(i): Decimal(t) for i, t in d["stops"].items()}
+        ex._marks = {int(i): Decimal(m) for i, m in d.get("marks", {}).items()}
         return ex
 
     def _save(self) -> None:

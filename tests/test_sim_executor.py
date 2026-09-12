@@ -96,8 +96,7 @@ async def test_persist_and_restore_round_trip():
     await ex.place_stop(6, Decimal(85))
     assert saved  # persisted after each mutation
     restored = SimExecutor.from_json("run1", saved[-1], taker_fee_rate=FEE, clock=lambda: T0)
-    restored.update_mark(6, Decimal(100))
-    s1, s2 = await ex.snapshot(), await restored.snapshot()
+    s1, s2 = await ex.snapshot(), await restored.snapshot()  # no re-priming the mark: marks are persisted
     assert s1.positions == s2.positions and s1.stops == s2.stops and s1.equity == s2.equity
 
 
@@ -107,3 +106,17 @@ async def test_heartbeat_counts_and_reduce_only_cannot_open():
     assert ex.heartbeat_count == 1
     ack = await ex.submit(req(reduce_only=True))
     assert ack.status == "rejected" and "reduce_only" in ack.reason
+
+
+async def test_reduce_only_clamps_to_position_size():
+    ex = make()
+    await ex.submit(req())  # open long 1
+    ex.drain_events()
+    ack = await ex.submit(req(cid="run1-6-2", side="sell", qty="100", reduce_only=True))
+    assert ack.status == "accepted"
+    ev = ex.drain_events()
+    order_update, fill = ev
+    assert order_update.filled_quantity == 1
+    assert fill.quantity == 1
+    snap = await ex.snapshot()
+    assert snap.position(6) is None
