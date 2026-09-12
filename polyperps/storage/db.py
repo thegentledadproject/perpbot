@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import asdict
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -20,6 +21,7 @@ from polyperps.exchange.types import (
     SourceType,
     Tick,
 )
+from polyperps.execution.types import DecisionRow, Intent, OrderRow, PositionLocalRow, State
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS ticks (
@@ -82,6 +84,30 @@ CREATE TABLE IF NOT EXISTS fee_schedule (
     fetched_at     TEXT NOT NULL,
     PRIMARY KEY (category, fetched_at)
 );
+
+CREATE TABLE IF NOT EXISTS decisions (
+    run_id TEXT NOT NULL, instrument_id INTEGER NOT NULL, seq INTEGER NOT NULL, ts TEXT NOT NULL,
+    state_before TEXT NOT NULL, target TEXT, verdicts_json TEXT NOT NULL, intent_json TEXT,
+    client_order_id TEXT, note TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (run_id, instrument_id, seq)
+);
+CREATE TABLE IF NOT EXISTS orders (
+    client_order_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, instrument_id INTEGER NOT NULL, side TEXT NOT NULL,
+    quantity TEXT NOT NULL, reduce_only INTEGER NOT NULL, status TEXT NOT NULL, exchange_order_id TEXT,
+    filled_quantity TEXT NOT NULL, avg_price TEXT, submitted_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+    reason TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS positions_local (
+    run_id TEXT NOT NULL, instrument_id INTEGER NOT NULL, state TEXT NOT NULL, size TEXT NOT NULL,
+    entry_price TEXT, stop_trigger TEXT, stop_order_id TEXT, cumulative_funding TEXT NOT NULL, updated_at TEXT NOT NULL,
+    PRIMARY KEY (run_id, instrument_id)
+);
+CREATE TABLE IF NOT EXISTS sim_account (run_id TEXT PRIMARY KEY, json TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS alerts (
+    ts TEXT NOT NULL, run_id TEXT NOT NULL, level TEXT NOT NULL, kind TEXT NOT NULL,
+    instrument_id INTEGER, detail_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS recovery (run_id TEXT NOT NULL, ts TEXT NOT NULL, findings_json TEXT NOT NULL);
 """
 
 
@@ -334,3 +360,134 @@ def count_rejections(conn: sqlite3.Connection, instrument_id: int) -> dict[str, 
         (instrument_id,),
     ).fetchall()
     return {reason: n for reason, n in rows}
+
+
+# --- Phase 2: execution / paper-trading tables --------------------------------
+
+
+def _dec(s: str | None) -> Decimal | None:
+    return Decimal(s) if s is not None else None
+
+
+def _intent_json(i: Intent | None) -> str | None:
+    if i is None:
+        return None
+    return json.dumps({"instrument_id": i.instrument_id, "side": i.side, "quantity": str(i.quantity),
+                       "notional": str(i.notional), "reduce_only": i.reduce_only, "reason": i.reason})
+
+
+def _intent_from_json(s: str | None) -> Intent | None:
+    if s is None:
+        return None
+    d = json.loads(s)
+    return Intent(instrument_id=d["instrument_id"], side=d["side"], quantity=Decimal(d["quantity"]),
+                  notional=Decimal(d["notional"]), reduce_only=d["reduce_only"], reason=d["reason"])
+
+
+def insert_decision(conn: sqlite3.Connection, row: DecisionRow) -> None:
+    conn.execute(
+        "INSERT INTO decisions VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (row.run_id, row.instrument_id, row.seq, _ts(row.ts), row.state_before.value,
+         str(row.target) if row.target is not None else None, json.dumps(row.verdicts, sort_keys=True),
+         _intent_json(row.intent), row.client_order_id, row.note),
+    )
+    conn.commit()
+
+
+def list_decisions(conn: sqlite3.Connection, run_id: str, instrument_id: int) -> list[DecisionRow]:
+    rows = conn.execute(
+        "SELECT run_id, instrument_id, seq, ts, state_before, target, verdicts_json, intent_json, client_order_id, note "
+        "FROM decisions WHERE run_id=? AND instrument_id=? ORDER BY seq", (run_id, instrument_id)).fetchall()
+    return [DecisionRow(run_id=r[0], instrument_id=r[1], seq=r[2], ts=_parse_ts(r[3]), state_before=State(r[4]),
+                        target=_dec(r[5]), verdicts=json.loads(r[6]), intent=_intent_from_json(r[7]),
+                        client_order_id=r[8], note=r[9]) for r in rows]
+
+
+def upsert_order(conn: sqlite3.Connection, o: OrderRow) -> None:
+    conn.execute(
+        "INSERT INTO orders VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(client_order_id) DO UPDATE SET "
+        "status=excluded.status, exchange_order_id=excluded.exchange_order_id, filled_quantity=excluded.filled_quantity, "
+        "avg_price=excluded.avg_price, updated_at=excluded.updated_at, reason=excluded.reason",
+        (o.client_order_id, o.run_id, o.instrument_id, o.side, str(o.quantity), int(o.reduce_only), o.status,
+         o.exchange_order_id, str(o.filled_quantity), str(o.avg_price) if o.avg_price is not None else None,
+         _ts(o.submitted_at), _ts(o.updated_at), o.reason),
+    )
+    conn.commit()
+
+
+def _order_from_row(r) -> OrderRow:
+    return OrderRow(client_order_id=r[0], run_id=r[1], instrument_id=r[2], side=r[3], quantity=Decimal(r[4]),
+                    reduce_only=bool(r[5]), status=r[6], exchange_order_id=r[7], filled_quantity=Decimal(r[8]),
+                    avg_price=_dec(r[9]), submitted_at=_parse_ts(r[10]), updated_at=_parse_ts(r[11]), reason=r[12])
+
+
+_ORDER_COLS = ("client_order_id, run_id, instrument_id, side, quantity, reduce_only, status, exchange_order_id, "
+               "filled_quantity, avg_price, submitted_at, updated_at, reason")
+
+
+def get_order(conn: sqlite3.Connection, client_order_id: str) -> OrderRow | None:
+    r = conn.execute(f"SELECT {_ORDER_COLS} FROM orders WHERE client_order_id=?", (client_order_id,)).fetchone()
+    return _order_from_row(r) if r else None
+
+
+def list_orders(conn: sqlite3.Connection, run_id: str, *, status: str | None = None) -> list[OrderRow]:
+    if status is None:
+        rows = conn.execute(f"SELECT {_ORDER_COLS} FROM orders WHERE run_id=? ORDER BY submitted_at", (run_id,)).fetchall()
+    else:
+        rows = conn.execute(f"SELECT {_ORDER_COLS} FROM orders WHERE run_id=? AND status=? ORDER BY submitted_at",
+                            (run_id, status)).fetchall()
+    return [_order_from_row(r) for r in rows]
+
+
+def upsert_position_local(conn: sqlite3.Connection, p: PositionLocalRow) -> None:
+    conn.execute(
+        "INSERT INTO positions_local VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(run_id, instrument_id) DO UPDATE SET "
+        "state=excluded.state, size=excluded.size, entry_price=excluded.entry_price, stop_trigger=excluded.stop_trigger, "
+        "stop_order_id=excluded.stop_order_id, cumulative_funding=excluded.cumulative_funding, updated_at=excluded.updated_at",
+        (p.run_id, p.instrument_id, p.state.value, str(p.size), str(p.entry_price) if p.entry_price is not None else None,
+         str(p.stop_trigger) if p.stop_trigger is not None else None, p.stop_order_id, str(p.cumulative_funding),
+         _ts(p.updated_at)),
+    )
+    conn.commit()
+
+
+def get_positions_local(conn: sqlite3.Connection, run_id: str) -> dict[int, PositionLocalRow]:
+    rows = conn.execute(
+        "SELECT run_id, instrument_id, state, size, entry_price, stop_trigger, stop_order_id, cumulative_funding, updated_at "
+        "FROM positions_local WHERE run_id=?", (run_id,)).fetchall()
+    return {r[1]: PositionLocalRow(run_id=r[0], instrument_id=r[1], state=State(r[2]), size=Decimal(r[3]),
+                                   entry_price=_dec(r[4]), stop_trigger=_dec(r[5]), stop_order_id=r[6],
+                                   cumulative_funding=Decimal(r[7]), updated_at=_parse_ts(r[8])) for r in rows}
+
+
+def save_sim_account(conn: sqlite3.Connection, run_id: str, json_text: str) -> None:
+    conn.execute("INSERT INTO sim_account VALUES (?,?,?) ON CONFLICT(run_id) DO UPDATE SET json=excluded.json, "
+                 "updated_at=excluded.updated_at", (run_id, json_text, _ts(datetime.now(timezone.utc))))
+    conn.commit()
+
+
+def load_sim_account(conn: sqlite3.Connection, run_id: str) -> str | None:
+    r = conn.execute("SELECT json FROM sim_account WHERE run_id=?", (run_id,)).fetchone()
+    return r[0] if r else None
+
+
+def insert_alert(conn: sqlite3.Connection, *, run_id: str, level: str, kind: str, instrument_id: int | None,
+                 detail_json: str, ts: datetime) -> None:
+    conn.execute("INSERT INTO alerts VALUES (?,?,?,?,?,?)", (_ts(ts), run_id, level, kind, instrument_id, detail_json))
+    conn.commit()
+
+
+def list_alerts(conn: sqlite3.Connection, run_id: str) -> list[tuple[datetime, str, str, int | None, dict]]:
+    rows = conn.execute("SELECT ts, level, kind, instrument_id, detail_json FROM alerts WHERE run_id=? ORDER BY ts",
+                        (run_id,)).fetchall()
+    return [(_parse_ts(r[0]), r[1], r[2], r[3], json.loads(r[4])) for r in rows]
+
+
+def insert_recovery(conn: sqlite3.Connection, *, run_id: str, ts: datetime, findings_json: str) -> None:
+    conn.execute("INSERT INTO recovery VALUES (?,?,?)", (run_id, _ts(ts), findings_json))
+    conn.commit()
+
+
+def list_recovery(conn: sqlite3.Connection, run_id: str) -> list[tuple[datetime, dict]]:
+    rows = conn.execute("SELECT ts, findings_json FROM recovery WHERE run_id=? ORDER BY ts", (run_id,)).fetchall()
+    return [(_parse_ts(r[0]), json.loads(r[1])) for r in rows]
