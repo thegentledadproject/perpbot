@@ -1,6 +1,8 @@
 """H2: cross-venue basis. basis = pm_close / hl_close - 1. Fade a stretched basis by
 trading the Polymarket leg. Proxy closes are looked up ONLY for open_ts values present in
-history, so the strategy cannot see a proxy hour the harness has not yet reached."""
+history, so the strategy cannot see a proxy hour the harness has not yet reached.
+The z-score window is the last `lookback` aligned (PM close, HL close) pairs walking
+back through history; hours missing either leg are skipped, not fatal (spec 6)."""
 
 from __future__ import annotations
 
@@ -25,16 +27,31 @@ class Basis:
         self._proxy = proxy_close_by_hour
         self._position = Decimal(0)
 
+    def _pair(self, b: Bar) -> Decimal | None:
+        hl = self._proxy.get(b.open_ts)
+        if b.close is None or hl is None or hl == 0:
+            return None
+        return b.close / hl - 1
+
     def target(self, history: Sequence[Bar]) -> Decimal:
-        window: list[Decimal] = []
-        for b in history[-self.lookback:]:
-            hl = self._proxy.get(b.open_ts)
-            if b.close is None or hl is None or hl == 0:
-                continue
-            window.append(b.close / hl - 1)
-        if len(window) < self.lookback or self._proxy.get(history[-1].open_ts) is None:
+        # Spec 6: the window is the last `lookback` ALIGNED pairs, not the last `lookback`
+        # hours. Walk backwards, skipping hours with no candle or no proxy close; gaps
+        # inside the window are skipped, not fatal. The current hour itself must be a
+        # valid pair, since the z-score is of the LAST value.
+        if not history or self._pair(history[-1]) is None:
             self._position = Decimal(0)
             return self._position
+        window: list[Decimal] = []
+        for b in reversed(history):
+            basis = self._pair(b)
+            if basis is not None:
+                window.append(basis)
+                if len(window) == self.lookback:
+                    break
+        if len(window) < self.lookback:
+            self._position = Decimal(0)
+            return self._position
+        window.reverse()  # chronological; window[-1] is the current hour
         z = zscore(window)
         if z is None:
             return self._position

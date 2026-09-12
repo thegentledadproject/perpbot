@@ -87,6 +87,39 @@ def test_h2_is_flat_when_proxy_hour_missing():
     assert s.target(bars[:25]) == 0
 
 
+def test_h2_window_is_last_lookback_aligned_pairs_and_skips_gaps_inside():
+    # Spec 6: the window is the last `lookback` ALIGNED pairs, not the last `lookback` hours.
+    # 27 hours: proxy missing at hours 3, 10 and 17 (three gaps inside the window), PM jumps to
+    # 103 at the last hour. Only 24 aligned pairs exist over 27 hours -> the window is full
+    # exactly at the last bar and the rich basis is faded (short PM).
+    bars = [bar(i) for i in range(26)] + [bar(26, close="103")]
+    hl = {b.open_ts: Decimal("100") for b in bars if b.open_ts not in {bars[3].open_ts, bars[10].open_ts, bars[17].open_ts}}
+    s = Basis(lookback=24, entry_z=Decimal("2.0"), proxy_close_by_hour=hl)
+    assert s.target(bars) == Decimal(-1)
+    # Same data, one hour shorter: 26 hours present but only 23 aligned pairs -> flat.
+    s2 = Basis(lookback=24, entry_z=Decimal("2.0"), proxy_close_by_hour=hl)
+    assert s2.target(bars[:26]) == Decimal(0)
+
+
+def test_h2_uses_older_pairs_to_fill_window_past_gaps():
+    # 40 hours of history, proxy missing at 5 of the last 24 hours: the old rule found only 19
+    # pairs in bars[-24:] and returned 0; the new rule reaches back to hour 11 for 24 pairs.
+    bars = [bar(i) for i in range(39)] + [bar(39, close="103")]
+    missing = {bars[i].open_ts for i in (20, 25, 30, 33, 37)}
+    hl = {b.open_ts: Decimal("100") for b in bars if b.open_ts not in missing}
+    s = Basis(lookback=24, entry_z=Decimal("2.0"), proxy_close_by_hour=hl)
+    assert s.target(bars) == Decimal(-1)
+
+
+def test_h2_is_flat_when_current_bar_has_no_close():
+    bars = [bar(i) for i in range(24)]
+    hl = {b.open_ts: Decimal("100") for b in bars}
+    s = Basis(lookback=24, entry_z=Decimal("2.0"), proxy_close_by_hour=hl)
+    from dataclasses import replace
+    incomplete_last = bars[:-1] + [replace(bars[-1], close=None, complete=False)]
+    assert s.target(incomplete_last) == Decimal(0)
+
+
 def test_h3_trades_toward_index_and_holds_then_exits():
     # mark 100 vs index 100.5 -> premium -50bps -> mark should catch up -> long; hold 1 bar then flat
     bars = [bar(0, index="100"), bar(1, index="100.5"), bar(2, index="100.5"), bar(3, index="100.5"), bar(4, index="100.5")]
