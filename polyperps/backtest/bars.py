@@ -3,6 +3,16 @@
 A Bar never fabricates: a missing candle or funding row leaves the field None
 and sets complete=False. The harness refuses to hold a position across an
 incomplete bar, so gaps cannot be traded through silently.
+
+Funding-timestamp convention: a funding_rates row stamped T is the payment
+settled at T for the hour ENDING T, so Bar(open_ts).funding_rate is the row at
+open_ts + 1h. Checked against the real DB on 2026-09-12 (spec 4.2): not
+contradicted, but not confirmed either -- the only native ticks (2026-09-11
+06:33Z, next_funding 07:00Z, rate 0.0000125) have no stored 07:00 row and the
+rate had been pinned at 0.0000125 for 253 hours, so the comparison has no
+discriminating power. TODO: re-check across an unpinned settlement before any
+native result is approved; if the row at next_funding differs from the ticks'
+rate, switch the lookup to funding.get(open_ts) and re-run H1.
 """
 
 from __future__ import annotations
