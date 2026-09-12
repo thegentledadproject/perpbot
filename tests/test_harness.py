@@ -220,3 +220,16 @@ def test_flip_realises_trade_pnl():
                        impact_bps=Decimal(0))
     assert res.trade_pnls == [Decimal("5")]  # long from 100, flipped at 105
     assert res.fill_notionals == [Decimal("100"), Decimal("200")]
+
+
+def test_result_params_namespace_strategy_params():
+    class Named:
+        name = "named"; params = {"lookback": 48, "entry_z": Decimal("1.5")}
+        def target(self, history):
+            return Decimal(0)
+
+    bars = [bar(0), bar(1)]
+    res = run_backtest(bars, Named(), minute_closes=minutes(bars), taker_fee_rate=FEE, warmup=0)
+    assert res.params["strategy"] == "named"
+    assert res.params["strategy_params"] == {"lookback": "48", "entry_z": "1.5"}
+    assert "lookback" not in res.params  # not splatted into the harness namespace

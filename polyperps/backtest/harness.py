@@ -40,7 +40,7 @@ class BacktestResult:
     returns: list[Decimal] = field(default_factory=list)
     trade_pnls: list[Decimal] = field(default_factory=list)
     fill_notionals: list[Decimal] = field(default_factory=list)
-    params: dict[str, str] = field(default_factory=dict)
+    params: dict[str, object] = field(default_factory=dict)  # harness params + {"strategy_params": {...}}
     bars_total: int = 0
     bars_complete: int = 0
     bars_constant_spread: int = 0  # bars whose spread came from the constant fallback, not the book
@@ -89,7 +89,8 @@ def run_backtest(
     res = BacktestResult(
         params={"taker_fee_rate": str(taker_fee_rate), "latency_s": str(latency_s),
                 "impact_bps": str(impact_bps), "notional": str(notional), "warmup": str(warmup),
-                "strategy": strategy.name, **{k: str(v) for k, v in strategy.params.items()}},
+                "strategy": strategy.name,
+                "strategy_params": {k: str(v) for k, v in strategy.params.items()}},
         bars_total=len(bars),
         bars_complete=sum(1 for b in bars if b.complete),
         bars_constant_spread=sum(1 for b in bars if b.spread_source == "constant"),
