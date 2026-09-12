@@ -96,3 +96,25 @@ async def test_reconcile_size_mismatch_halts():
     ms = await pf.reconcile_now()
     assert [m.kind for m in ms] == ["size"]
     assert router.state is State.HALTED and any(a[1] == "CRITICAL" for a in list_alerts(conn, "r"))
+
+
+def test_diff_skips_size_and_stop_checks_for_pending_local_rows():
+    # An order is in flight (ENTRY_PENDING): the persisted size is still pre-fill (0) while the
+    # remote already reflects the fill. That's not a reconciliation problem - the fill handler
+    # owns this row's transition - so diff() must not raise size or missing_stop for it.
+    ms = diff(local={6: local(6, State.ENTRY_PENDING, "0")}, remote=remote([pv(6, "1")]),
+              run_id="r", known_orders=set())
+    assert ms == []
+
+
+async def test_reconcile_size_mismatch_halt_is_idempotent():
+    conn, ex, router, pf = await make_open()
+    ex.update_mark(6, Decimal(50))
+    ex.check_triggers()                           # stop fires on the venue; we never process the event
+    await pf.reconcile_now()
+    assert router.state is State.HALTED
+    ms2 = await pf.reconcile_now()                # size mismatch still present on the second pass
+    assert [m.kind for m in ms2] == ["size"]
+    assert router.state is State.HALTED
+    halted_alerts = [a for a in list_alerts(conn, "r") if a[2] == "halted"]
+    assert len(halted_alerts) == 1
