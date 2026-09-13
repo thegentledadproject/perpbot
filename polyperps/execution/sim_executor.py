@@ -52,6 +52,7 @@ class SimExecutor:
     ) -> None:
         self.run_id = run_id
         self._cash = equity
+        self.start_equity = equity   # pnl_drawdown baseline; persisted so a restart keeps the original
         self._fee = taker_fee_rate
         self._slip = (spread_bps / 2 + impact_bps) / _BPS
         self._lev = leverage
@@ -214,7 +215,7 @@ class SimExecutor:
     # --- persistence ------------------------------------------------------
     def to_json(self) -> str:
         return json.dumps({
-            "cash": str(self._cash), "n": self._n,
+            "cash": str(self._cash), "start_equity": str(self.start_equity), "n": self._n,
             "positions": {str(i): {"size": str(p.size), "entry": str(p.entry), "funding": str(p.funding)}
                           for i, p in self._pos.items() if p.size != 0},
             "stops": {str(i): str(t) for i, t in self._stops.items()},
@@ -225,6 +226,7 @@ class SimExecutor:
     def from_json(cls, run_id: str, text: str, **kw) -> "SimExecutor":
         d = json.loads(text)
         ex = cls(run_id, equity=Decimal(d["cash"]), **kw)
+        ex.start_equity = Decimal(d.get("start_equity", d["cash"]))
         ex._n = d["n"]
         for i, p in d["positions"].items():
             ex._pos[int(i)] = _Pos(Decimal(p["size"]), Decimal(p["entry"]), Decimal(p["funding"]))

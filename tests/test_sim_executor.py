@@ -123,3 +123,15 @@ async def test_reduce_only_clamps_to_position_size():
     assert fill.quantity == 1
     snap = await ex.snapshot()
     assert snap.position(6) is None
+
+
+async def test_start_equity_survives_persistence_and_trading():
+    saved = []
+    ex = make(persist=saved.append)
+    assert ex.start_equity == Decimal(1000)
+    await ex.submit(req())
+    ex.drain_events()
+    ex.update_mark(6, Decimal(50))
+    restored = SimExecutor.from_json("run1", saved[-1], taker_fee_rate=FEE, clock=lambda: T0)
+    assert restored.start_equity == Decimal(1000)
+    assert (await restored.snapshot()).equity != Decimal(1000)   # cash moved; the baseline did not

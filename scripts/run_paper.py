@@ -143,7 +143,8 @@ async def run_once(args, settings) -> None:
                               executor=executor, conn=conn, alerter=alerter, categories=categories)
         for iid in settings.instrument_ids
     }
-    pf = Portfolio(run_id=run_id, executor=executor, conn=conn, alerter=alerter, routers=routers)
+    pf = Portfolio(run_id=run_id, executor=executor, conn=conn, alerter=alerter, routers=routers,
+                   start_equity=executor.start_equity)
     rep = await recover(conn=conn, run_id=run_id, executor=executor, routers=routers, alerter=alerter)
     log.info("recovery: %s", rep.to_dict())
     _recover_strategies(routers)

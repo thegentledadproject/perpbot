@@ -22,7 +22,7 @@ from polyperps.execution.types import (
     AccountSnapshot, DecisionRow, FillUpdate, Intent, OrderAck, OrderRequest, OrderRow, OrderUpdate,
     PositionLocalRow, ReconcileNow, State,
 )
-from polyperps.monitor.alerts import Alert, Alerter, margin_alert
+from polyperps.monitor.alerts import Alert, Alerter, margin_alert, pnl_alert
 from polyperps.risk.kill_switch import Action
 from polyperps.risk.liquidation_guard import (
     LIMITS, Reject, Resize, RiskLimits, Verdict, check_open, funding_exit_due, stop_price, verdict_label, vet_entry,
@@ -79,6 +79,7 @@ class InstrumentRouter:
         self.cumulative_funding = Decimal(0)
         self._pending_cid: str | None = None
         self._dseq = 0  # decision-row primary-key counter; distinct from self.seq (order count / cid numbering)
+        self._last_margin_level: str | None = None   # I5: margin_ratio alerts fire on level transitions only
 
     # --- persistence helpers ------------------------------------------------
     def load_local(self, row: PositionLocalRow) -> None:
@@ -173,13 +174,23 @@ class InstrumentRouter:
     async def on_fast(self, mark: Decimal, snapshot: AccountSnapshot) -> None:
         if self.state is not State.OPEN:
             return
+        if snapshot.in_liquidation and self.size != 0:
+            # I6: the venue is liquidating us. Nothing to send (the exchange owns the close);
+            # freeze like HALTED until an operator clears it (clear_halt / --clear-halt).
+            self._alert("CRITICAL", "liquidation", size=self.size, mark=mark)
+            self._set_state(State.LIQUIDATED)
+            return
         pos = snapshot.position(self.instrument_id)
         if pos is None:
             return  # vanished: reconciliation decides
         if pos.liquidation_price is not None:
+            # I5: at 3x the entry distance (~0.313) is already under margin_warn, so emitting every
+            # tick would alert every 20 s for the life of the position. Emit on transitions only.
             a = margin_alert(abs(pos.liquidation_price - mark) / mark, self.instrument_id, self.clock())
-            if a is not None:
+            level = a.level if a is not None else None
+            if a is not None and level != self._last_margin_level:
                 self.alerter.emit(a)
+            self._last_margin_level = level
         if check_open(pos, mark=mark, limits=self.limits) == "flatten":
             await self._exit(mark, "liq_distance", target=None)
         elif funding_exit_due(pos, limits=self.limits):
@@ -306,6 +317,7 @@ class InstrumentRouter:
         self.size = new
         if new == 0:
             self.cumulative_funding = Decimal(0)
+            self._last_margin_level = None   # next position starts its margin-alert ladder afresh
         self._persist()
 
     async def replace_stop(self) -> None:
@@ -325,6 +337,7 @@ class InstrumentRouter:
         self._set_state(State.HALTED)
 
     def clear_halt(self) -> None:
+        """Operator decision: leave HALTED (or LIQUIDATED) for whatever the book says."""
         self._set_state(State.OPEN if self.size != 0 else State.FLAT)
 
     def adopt_pending(self, client_order_id: str, state: State) -> None:
@@ -346,10 +359,13 @@ class Portfolio:
 
     def __init__(self, *, run_id: str, executor: Executor, conn, alerter: Alerter,
                  routers: Mapping[int, InstrumentRouter],
-                 reconcile: Callable[[], Awaitable[None]] | None = None) -> None:
+                 reconcile: Callable[[], Awaitable[None]] | None = None,
+                 start_equity: Decimal | None = None) -> None:
         self.run_id, self.executor, self.conn, self.alerter = run_id, executor, conn, alerter
         self.routers = dict(routers)
         self.reconcile = reconcile if reconcile is not None else self._reconcile
+        self.start_equity = start_equity                # I7: pnl_drawdown baseline; None = alert unwired
+        self._last_pnl_level: str | None = None
         self._lock = asyncio.Lock()
 
     async def on_bar(self, histories: Mapping[int, Sequence[Bar]], kill: Action) -> None:
@@ -367,6 +383,15 @@ class Portfolio:
                 router = self.routers.get(iid)
                 if router is not None:
                     await router.on_fast(mark, snapshot)
+            if self.start_equity is not None:
+                # I7: once per tick, transitions only (None -> WARN -> CRITICAL and back), like I5.
+                a = pnl_alert(snapshot.equity, self.start_equity, snapshot.ts)
+                level = a.level if a is not None else None
+                if a is not None and level != self._last_pnl_level:
+                    self.alerter.emit(a)
+                self._last_pnl_level = level
+            # funding_drift_alert would go here (realised vs expected funding per instrument);
+            # deferred to Phase 2b - the sim's funding is the predicted rate, so it can never drift.
 
     async def dispatch(self, ev: OrderUpdate | FillUpdate | ReconcileNow) -> None:
         async with self._lock:

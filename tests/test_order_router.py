@@ -5,6 +5,8 @@ from decimal import Decimal
 from polyperps.backtest.bars import Bar
 from polyperps.execution.order_router import InstrumentRouter, Portfolio, apply_guards
 from polyperps.execution.sim_executor import SimExecutor
+from dataclasses import replace as dc_replace
+
 from polyperps.execution.types import AccountSnapshot, FillUpdate, Intent, OrderRequest, State
 from polyperps.exchange.types import SourceType
 from polyperps.monitor.alerts import Alerter, SqliteSink
@@ -370,3 +372,76 @@ async def test_warmup_gate_skips_until_history_is_long_enough():
     assert calls == [] and get_order(conn, "r-6-1") is None and router.state is State.FLAT
     await pf.on_bar({6: [bar(0), bar(1), bar(2)]}, "run")
     assert calls == [3] and router.state is State.ENTRY_PENDING
+
+
+# --- final review I5/I6/I7: alert transitions, LIQUIDATED, pnl alert ------------------------
+
+
+async def test_margin_alert_only_on_level_transitions():
+    """At 3x the entry liq distance (~0.313) is already under margin_warn (0.35), so a
+    per-tick alert would fire every 20 s for the life of every position."""
+    conn, ex, strat, router, pf = make()
+    await pf.on_bar({6: [bar(0)]}, "run"); await pump(pf, ex)
+    await pf.on_fast({6: Decimal(100)})
+    await pf.on_fast({6: Decimal(100)})
+    margin = [a for a in list_alerts(conn, "r") if a[2] == "margin_ratio"]
+    assert [a[1] for a in margin] == ["WARN"]
+    ex.update_mark(6, Decimal(93))          # (93 - 68.72) / 93 = 0.261: CRITICAL, but >= 0.25 so no flatten
+    await pf.on_fast({6: Decimal(93)})
+    await pf.on_fast({6: Decimal(93)})
+    margin = [a for a in list_alerts(conn, "r") if a[2] == "margin_ratio"]
+    assert [a[1] for a in margin] == ["WARN", "CRITICAL"] and router.state is State.OPEN
+    ex.update_mark(6, Decimal(100))          # back to WARN: one more
+    await pf.on_fast({6: Decimal(100)})
+    assert [a[1] for a in list_alerts(conn, "r") if a[2] == "margin_ratio"] == ["WARN", "CRITICAL", "WARN"]
+
+
+class LiquidatingExecutor(SimExecutor):
+    async def snapshot(self):
+        return dc_replace(await super().snapshot(), in_liquidation=True)
+
+
+async def test_in_liquidation_moves_router_to_liquidated_until_cleared():
+    conn, ex, strat, router, pf = make(executor_cls=LiquidatingExecutor)
+    await pf.on_bar({6: [bar(0)]}, "run"); await pump(pf, ex)
+    assert router.state is State.OPEN
+    await pf.on_fast({6: Decimal(100)})
+    assert router.state is State.LIQUIDATED
+    liq = [a for a in list_alerts(conn, "r") if a[2] == "liquidation"]
+    assert len(liq) == 1 and liq[0][1] == "CRITICAL" and liq[0][4] == {"size": "1.00000000", "mark": "100"}
+    assert get_positions_local(conn, "r")[6].state is State.LIQUIDATED
+    await pf.on_fast({6: Decimal(100)})                                  # no re-alert, no orders
+    await pf.on_bar({6: [bar(0), bar(1)]}, "run")
+    assert list_decisions(conn, "r", 6)[-1].note == "skip:LIQUIDATED"
+    assert len([a for a in list_alerts(conn, "r") if a[2] == "liquidation"]) == 1
+    assert get_order(conn, "r-6-2") is None
+    router.clear_halt()                                                   # operator decision, like HALTED
+    assert router.state is State.OPEN
+
+
+async def test_pnl_alert_on_drawdown_level_transitions_only():
+    conn = connect(":memory:")
+    ex = SimExecutor("r", equity=Decimal(1000), taker_fee_rate=FEE, clock=lambda: T0)
+    ex.update_mark(6, Decimal(100))
+    alerter = Alerter("r", [SqliteSink(conn)])
+    pf = Portfolio(run_id="r", executor=ex, conn=conn, alerter=alerter, routers={}, start_equity=ex.start_equity)
+    await ex.submit(OrderRequest(client_order_id="x", instrument_id=6, side="buy", quantity=Decimal(10),
+                                 reduce_only=False, ts=T0)); ex.drain_events()
+    await pf.on_fast({6: Decimal(100)})
+    assert kinds(conn) == []
+    ex.update_mark(6, Decimal(94))            # 999.6 - 60.8 = 938.8 -> -6.1 %
+    await pf.on_fast({6: Decimal(94)})
+    await pf.on_fast({6: Decimal(94)})
+    pnl = [a for a in list_alerts(conn, "r") if a[2] == "pnl_drawdown"]
+    assert [a[1] for a in pnl] == ["WARN"]
+    ex.update_mark(6, Decimal(90))            # -10.1 %
+    await pf.on_fast({6: Decimal(90)})
+    await pf.on_fast({6: Decimal(90)})
+    assert [a[1] for a in list_alerts(conn, "r") if a[2] == "pnl_drawdown"] == ["WARN", "CRITICAL"]
+
+
+async def test_portfolio_without_start_equity_emits_no_pnl_alert():
+    conn, ex, strat, router, pf = make()
+    ex._cash = Decimal(1)                     # any drawdown you like: nothing to compare against
+    await pf.on_fast({6: Decimal(100)})
+    assert "pnl_drawdown" not in kinds(conn)
