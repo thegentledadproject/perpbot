@@ -11,15 +11,22 @@ from polyperps.gates import ExecutionMode, GateDecision
 
 T0 = datetime(2026, 9, 12, 12, 0, tzinfo=timezone.utc)
 
+_DEFAULT_POSITION = SimpleNamespace(instrument_id=6, size=Decimal("0.5"), entry_price=Decimal(100), leverage=3,
+                                    position_value=Decimal(50), liquidation_price=Decimal(70),
+                                    unrealized_pnl=Decimal(1), cumulative_funding=Decimal("-0.2"))
+
 
 class FakeSession:
-    def __init__(self):
+    def __init__(self, order_status="accepted", positions=None, in_liquidation=False):
         self.calls = []
         self._events = []
+        self.order_status = order_status
+        self.positions = positions if positions is not None else (_DEFAULT_POSITION,)
+        self.in_liquidation = in_liquidation
 
     async def place_order(self, **kw):
         self.calls.append(("place_order", kw))
-        return SimpleNamespace(order=SimpleNamespace(id=777))
+        return SimpleNamespace(order=SimpleNamespace(id=777, status=self.order_status))
 
     async def cancel_order(self, **kw):
         self.calls.append(("cancel_order", kw))
@@ -33,11 +40,9 @@ class FakeSession:
 
     async def fetch_portfolio(self):
         return SimpleNamespace(
-            positions=(SimpleNamespace(instrument_id=6, size=Decimal("0.5"), entry_price=Decimal(100), leverage=3,
-                                       position_value=Decimal(50), liquidation_price=Decimal(70),
-                                       unrealized_pnl=Decimal(1), cumulative_funding=Decimal("-0.2")),),
+            positions=self.positions,
             margin=SimpleNamespace(total_account_value=Decimal(1000)), withdrawable=Decimal(900),
-            in_liquidation=False, timestamp=T0)
+            in_liquidation=self.in_liquidation, timestamp=T0)
 
     async def fetch_open_orders(self):
         return (SimpleNamespace(client_order_id="r-6-3", id=1, tp_sl=None, instrument_id=6),
@@ -71,6 +76,11 @@ def test_constructor_refuses_by_default_gate(monkeypatch):
         LiveExecutor(FakeSession(), instrument_ids=[6], modes={}, gate=lambda i: GateDecision(False, "closed"))
 
 
+def test_empty_instrument_ids_refuses():
+    with pytest.raises(GateClosed):
+        LiveExecutor(FakeSession(), instrument_ids=[], modes={}, gate=OPEN)
+
+
 async def test_submit_maps_payload_and_ack():
     s = FakeSession()
     ex = LiveExecutor(s, instrument_ids=[6], modes={}, gate=OPEN, clock=lambda: T0)
@@ -82,6 +92,22 @@ async def test_submit_maps_payload_and_ack():
     assert s.calls[0] == ("place_order", {"instrument_id": 6, "side": "BUY", "quantity": Decimal("0.5"),
                                           "time_in_force": "ioc", "reduce_only": False, "client_order_id": "r-6-1"})
     assert ack.status == "accepted" and ack.exchange_order_id == "777"
+
+
+async def test_submit_maps_ioc_no_fill_to_rejected():
+    s = FakeSession(order_status="ioc_no_fill")
+    ex = LiveExecutor(s, instrument_ids=[6], modes={}, gate=OPEN, clock=lambda: T0)
+    ack = await ex.submit(OrderRequest(client_order_id="r-6-2", instrument_id=6, side="buy", quantity=Decimal("0.5"),
+                                       reduce_only=False, ts=T0))
+    assert ack.status == "rejected" and ack.reason == "ioc_no_fill"
+
+
+async def test_submit_maps_filled_to_accepted():
+    s = FakeSession(order_status="filled")
+    ex = LiveExecutor(s, instrument_ids=[6], modes={}, gate=OPEN, clock=lambda: T0)
+    ack = await ex.submit(OrderRequest(client_order_id="r-6-3", instrument_id=6, side="buy", quantity=Decimal("0.5"),
+                                       reduce_only=False, ts=T0))
+    assert ack.status == "accepted"
 
 
 async def test_stop_heartbeat_cancel():
@@ -106,6 +132,23 @@ async def test_snapshot_maps_portfolio_and_stops():
     assert snap.stops == {6: Decimal(85)}
 
 
+async def test_snapshot_short_position_size_negative_notional_positive():
+    short_pos = SimpleNamespace(instrument_id=6, size=Decimal("-0.5"), entry_price=Decimal(100), leverage=3,
+                                position_value=Decimal(50), liquidation_price=Decimal(130),
+                                unrealized_pnl=Decimal(-1), cumulative_funding=Decimal("0.1"))
+    ex = LiveExecutor(FakeSession(positions=(short_pos,)), instrument_ids=[6], modes={}, gate=OPEN, clock=lambda: T0)
+    snap = await ex.snapshot()
+    pos = snap.position(6)
+    assert pos.size == Decimal("-0.5")
+    assert pos.notional == Decimal(50)
+
+
+async def test_snapshot_in_liquidation_propagates():
+    ex = LiveExecutor(FakeSession(in_liquidation=True), instrument_ids=[6], modes={}, gate=OPEN, clock=lambda: T0)
+    snap = await ex.snapshot()
+    assert snap.in_liquidation is True
+
+
 async def test_events_mapping():
     s = FakeSession()
     from polymarket.models.perps.events import PerpsResyncEvent
@@ -120,3 +163,17 @@ async def test_events_mapping():
     out = [e async for e in ex.events()]
     assert [type(e) for e in out] == [OrderUpdate, FillUpdate, ReconcileNow]
     assert out[1].instrument_id == 6 and out[1].fee == Decimal("0.04")
+
+
+async def test_events_order_status_mapping():
+    s = FakeSession()
+    s._events = [
+        SimpleNamespace(type="order", payload=SimpleNamespace(client_order_id="r-6-1", status="ioc_no_fill",
+                                                              filled_quantity=Decimal(0)), timestamp=T0),
+        SimpleNamespace(type="order", payload=SimpleNamespace(client_order_id="r-6-1", status="armed",
+                                                              filled_quantity=Decimal(0)), timestamp=T0),
+    ]
+    ex = LiveExecutor(s, instrument_ids=[6], modes={}, gate=OPEN, clock=lambda: T0)
+    out = [e async for e in ex.events()]
+    assert len(out) == 1
+    assert isinstance(out[0], OrderUpdate) and out[0].status == "rejected"
