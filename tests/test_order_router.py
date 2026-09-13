@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -64,9 +65,27 @@ class RacyExecutor(SimExecutor):
         return await super().snapshot()
 
 
-def make(target=1, equity="1000", clock=lambda: T0):
+class YieldingExecutor(SimExecutor):
+    """A sim whose venue calls actually suspend (like a live executor's network hops), so two
+    Portfolio coroutines can genuinely interleave in the places a real run interleaves."""
+
+    async def place_stop(self, instrument_id, trigger_price):
+        await asyncio.sleep(0)                       # in flight: the venue hasn't recorded it yet
+        return await super().place_stop(instrument_id, trigger_price)
+
+    async def cancel_stop(self, instrument_id):
+        await super().cancel_stop(instrument_id)
+        await asyncio.sleep(0)
+
+    async def snapshot(self):
+        snap = await super().snapshot()
+        await asyncio.sleep(0)
+        return snap
+
+
+def make(target=1, equity="1000", clock=lambda: T0, executor_cls=SimExecutor):
     conn = connect(":memory:")
-    ex = SimExecutor("r", equity=Decimal(equity), taker_fee_rate=FEE, clock=clock)
+    ex = executor_cls("r", equity=Decimal(equity), taker_fee_rate=FEE, clock=clock)
     ex.update_mark(6, Decimal(100)); ex.update_mark(7, Decimal(100))
     alerter = Alerter("r", [SqliteSink(conn)])
     strat = Strat(target)
@@ -214,8 +233,8 @@ async def test_external_stop_fill_flattens_and_alerts():
     conn, ex, strat, router, pf = make()
     await pf.on_bar({6: [bar(0)]}, "run"); await pump(pf, ex)
     ex.update_mark(6, Decimal(80))
-    ex.check_triggers()
-    await pump(pf, ex)
+    for f in ex.check_triggers():       # C2: stop-fire fills are returned, not queued
+        await pf.dispatch(f)
     assert router.state is State.FLAT and strat.flattened == 1 and "stop_fired" in kinds(conn)
 
 
@@ -282,3 +301,51 @@ async def test_load_local_restores_seq_counters_across_restart():
     await pf2.on_bar({6: [bar(0), bar(1)]}, "run")     # target 0 -> exit decision; must not collide on seq
     assert router2.state is State.EXIT_PENDING
     assert get_order(conn, "r-6-2") is not None
+
+
+# --- final review: C2 stop-fire vs reconcile race ------------------------------------------
+
+
+async def test_stop_fire_with_concurrent_reconcile_does_not_halt():
+    """The fast loop's contract (mirrored by fast_step below): stop-fire fills come back from
+    check_triggers() and are dispatched right there, before on_fast and before any other task
+    can observe the account. A reconcile scheduled alongside must see either the pre-fire state
+    or the finished FLAT row - never local OPEN vs remote 0."""
+    conn, ex, strat, router, pf = make(executor_cls=YieldingExecutor)
+    await pf.on_bar({6: [bar(0)]}, "run"); await pump(pf, ex)
+    assert router.state is State.OPEN
+    ex.update_mark(6, Decimal(80))
+    mismatches = []
+
+    async def fast_step():                           # == scripts/run_paper.py fast_loop body
+        for f in ex.check_triggers():
+            await pf.dispatch(f)
+        await pf.on_fast({6: Decimal(80)})
+
+    async def reconcile():
+        mismatches.extend(await pf.reconcile_now())
+
+    await asyncio.gather(fast_step(), reconcile())
+    assert mismatches == []
+    assert "halted" not in kinds(conn)
+    assert router.state is State.FLAT and "stop_fired" in kinds(conn)
+
+
+async def test_portfolio_lock_serialises_fill_handling_against_reconcile():
+    """Without the Portfolio lock a reconcile can run inside handle_event's await on
+    place_stop: local row already OPEN, venue not yet holding the stop -> a phantom
+    missing_stop and a duplicate stop placement. With the lock, reconcile waits its turn."""
+    conn, ex, strat, router, pf = make(executor_cls=YieldingExecutor)
+    await pf.on_bar({6: [bar(0)]}, "run")
+    assert router.state is State.ENTRY_PENDING
+    fill = [e for e in ex.drain_events() if isinstance(e, FillUpdate)][0]
+    mismatches = []
+
+    async def reconcile():
+        mismatches.extend(await pf.reconcile_now())
+
+    await asyncio.gather(pf.dispatch(fill), reconcile())
+    assert mismatches == []
+    assert "stop_missing" not in kinds(conn)
+    assert kinds(conn).count("stop_placed") == 1
+    assert router.state is State.OPEN and (await ex.snapshot()).stops == {6: router.stop_trigger}

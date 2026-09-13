@@ -150,7 +150,12 @@ class SimExecutor:
         self._save()
 
     def check_triggers(self) -> list[FillUpdate]:
-        """Fire stops against current marks. Callable with the router stopped."""
+        """Fire stops against current marks. Callable with the router stopped.
+
+        The account mutates synchronously; the resulting fills are RETURNED, never queued
+        on events(). The caller (run_paper's fast loop) dispatches them itself, in the same
+        task and before anything else can observe the account - otherwise a reconcile could
+        run between the mutation and the pump's delivery and halt on a phantom size mismatch."""
         fired: list[FillUpdate] = []
         for iid, trig in list(self._stops.items()):
             p = self._pos.get(iid)
@@ -165,7 +170,6 @@ class SimExecutor:
                 self._marks[iid] = trig  # stops fill at the trigger (plus slippage)
                 fill = self._fill(req, self._clock())
                 self._marks[iid] = mark
-                self._queue.put_nowait(fill)
                 fired.append(fill)
                 del self._stops[iid]
         if fired:

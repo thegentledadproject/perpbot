@@ -69,6 +69,9 @@ async def test_stop_fires_from_check_triggers_without_router():
     assert len(fills) == 1 and fills[0].side == "sell" and fills[0].quantity == 1
     snap = await ex.snapshot()
     assert snap.position(6) is None and snap.stops == {}
+    # C2: the account mutates synchronously, but the fill is RETURNED to the caller, not
+    # queued - the fast loop dispatches it itself so reconciliation can never see the gap.
+    assert ex.drain_events() == []
 
 
 async def test_timeout_applies_fill_but_raises():

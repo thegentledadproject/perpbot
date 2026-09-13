@@ -333,28 +333,41 @@ class InstrumentRouter:
 
 
 class Portfolio:
+    """Drives the routers. Every public entry point (on_bar / on_fast / dispatch / reconcile_now)
+    runs under one asyncio.Lock, so a reconcile can never interleave with a half-applied fill or
+    an in-flight send (with a live executor those await the network). The locked public methods
+    call unlocked internals; `reconcile` (the ReconcileNow handler) is invoked from inside the
+    lock, so a custom one must not call reconcile_now() or it deadlocks."""
+
     def __init__(self, *, run_id: str, executor: Executor, conn, alerter: Alerter,
                  routers: Mapping[int, InstrumentRouter],
                  reconcile: Callable[[], Awaitable[None]] | None = None) -> None:
         self.run_id, self.executor, self.conn, self.alerter = run_id, executor, conn, alerter
         self.routers = dict(routers)
-        self.reconcile = reconcile if reconcile is not None else self.reconcile_now
+        self.reconcile = reconcile if reconcile is not None else self._reconcile
+        self._lock = asyncio.Lock()
 
     async def on_bar(self, histories: Mapping[int, Sequence[Bar]], kill: Action) -> None:
-        snapshot = await self.executor.snapshot()
-        for iid, history in histories.items():
-            router = self.routers.get(iid)
-            if router is not None and history:
-                await router.on_bar(history, snapshot, kill)
+        async with self._lock:
+            snapshot = await self.executor.snapshot()
+            for iid, history in histories.items():
+                router = self.routers.get(iid)
+                if router is not None and history:
+                    await router.on_bar(history, snapshot, kill)
 
     async def on_fast(self, marks: Mapping[int, Decimal]) -> None:
-        snapshot = await self.executor.snapshot()
-        for iid, mark in marks.items():
-            router = self.routers.get(iid)
-            if router is not None:
-                await router.on_fast(mark, snapshot)
+        async with self._lock:
+            snapshot = await self.executor.snapshot()
+            for iid, mark in marks.items():
+                router = self.routers.get(iid)
+                if router is not None:
+                    await router.on_fast(mark, snapshot)
 
     async def dispatch(self, ev: OrderUpdate | FillUpdate | ReconcileNow) -> None:
+        async with self._lock:
+            await self._dispatch(ev)
+
+    async def _dispatch(self, ev: OrderUpdate | FillUpdate | ReconcileNow) -> None:
         if isinstance(ev, ReconcileNow):
             if self.reconcile is not None:
                 await self.reconcile()
@@ -372,6 +385,10 @@ class Portfolio:
             await self.dispatch(ev)
 
     async def reconcile_now(self) -> list[Mismatch]:
+        async with self._lock:
+            return await self._reconcile()
+
+    async def _reconcile(self) -> list[Mismatch]:
         snapshot = await self.executor.snapshot()
         local = db.get_positions_local(self.conn, self.run_id)
         # "known_orders" is what diff() treats as ours-and-possibly-still-resting on the venue.

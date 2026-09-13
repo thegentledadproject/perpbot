@@ -35,6 +35,8 @@ from polyperps.strategies import GRIDS, build_strategy
 log = logging.getLogger("polyperps.paper")
 HEARTBEAT_S = 20
 RECONCILE_S = 60
+INITIAL_BACKOFF_S = 1.0
+MAX_BACKOFF_S = 60.0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -76,7 +78,7 @@ async def run_once(args, settings) -> None:
         raise SystemExit("h2 needs a live proxy feed; not wired in Phase 2a")
     settings.db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = db.connect(settings.db_path)
-    run_id = args.run_id or f"paper-{datetime.now(timezone.utc):%Y%m%dT%H%M%S%f}"
+    run_id = args.run_id   # minted once in main(); a supervised restart must reopen the same paper account
     alerter = _alerter(run_id, conn)
     fee = db.latest_fee(conn, args.fee_category)
     if fee is None:
@@ -139,11 +141,12 @@ async def run_once(args, settings) -> None:
             if stop.is_set():
                 break
             await executor.heartbeat()
-            # check_triggers() fires stops by pushing FillUpdates onto the same queue
-            # executor.events() drains; pf.run_event_pump() (already running as one of
-            # `tasks`) dispatches them from there. Dispatching the return value here too
-            # would process each stop-fire fill twice.
-            executor.check_triggers()
+            # check_triggers() mutates the sim account synchronously and RETURNS the stop-fire
+            # fills (never queues them). Dispatch them right here, in this task, before on_fast
+            # and before reconcile_loop can take the Portfolio lock - otherwise a reconcile could
+            # see local OPEN vs remote 0 and halt on a stop that simply hasn't been delivered.
+            for fill in executor.check_triggers():
+                await pf.dispatch(fill)
             await pf.on_fast(dict(marks))
 
     async def reconcile_loop():
@@ -180,11 +183,13 @@ def main() -> None:
                    for i in settings.instrument_ids]
         print(f"--executor live is not available in Phase 2a. Gate says: {reasons}", file=sys.stderr)
         raise SystemExit(2)
+    args.run_id = args.run_id or f"paper-{datetime.now(timezone.utc):%Y%m%dT%H%M%S%f}"
+    log.info("run_id %s", args.run_id)
     asyncio.run(_supervise(args, settings))
 
 
 async def _supervise(args, settings) -> None:
-    backoff = 1.0
+    backoff = INITIAL_BACKOFF_S
     while True:
         started = asyncio.get_running_loop().time()
         try:
@@ -195,7 +200,7 @@ async def _supervise(args, settings) -> None:
         except Exception:
             log.exception("paper run crashed; restarting in %.0fs", backoff)
         ran = asyncio.get_running_loop().time() - started
-        backoff = 1.0 if ran > 300 else min(backoff * 2, 60.0)
+        backoff = INITIAL_BACKOFF_S if ran > 300 else min(backoff * 2, MAX_BACKOFF_S)
         await asyncio.sleep(backoff)
 
 
