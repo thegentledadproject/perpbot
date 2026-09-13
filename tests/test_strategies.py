@@ -186,3 +186,29 @@ def test_build_strategy():
         build_strategy("h2", GRIDS["h2"][0])
     with pytest.raises(ValueError):
         build_strategy("h9", {})
+
+
+# --- final review I4: strategy position state survives a restart ---------------------------
+
+
+def test_h1_on_recover_restores_position_through_a_neutral_bar():
+    s = FundingReversion(lookback=48, entry_z=Decimal("1.5"), exit_z=Decimal("0.5"))
+    s.on_recover(1)
+    assert s.target([bar(i, funding="0.0001") for i in range(48)]) == Decimal(1)   # flat funding: z None -> hold
+    s.on_recover(-1)
+    assert s.target([bar(i, funding="0.0001") for i in range(48)]) == Decimal(-1)
+    s.on_recover(0)
+    assert s.target([bar(i, funding="0.0001") for i in range(48)]) == Decimal(0)
+
+
+def test_h2_on_recover_restores_position_through_a_neutral_bar():
+    bars = [bar(i) for i in range(3)]
+    s = Basis(lookback=3, entry_z=Decimal("2.0"), proxy_close_by_hour={b.open_ts: Decimal(100) for b in bars})
+    s.on_recover(1)
+    assert s.target(bars) == Decimal(1)                # basis 0 everywhere: z None -> hold what we had
+
+
+def test_h3_on_recover_restores_position_through_a_neutral_bar():
+    s = IndexLag(entry_bps=Decimal("10"), hold_bars=3)
+    s.on_recover(1)
+    assert s.target([bar(0, index="100")]) == Decimal(1)   # held 1 of 3 bars

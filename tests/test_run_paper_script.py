@@ -104,3 +104,24 @@ def test_seed_history_zero_bars_is_fine():
     builder = LiveBarBuilder()
     assert mod.seed_history(conn, builder, {6: 48}, now=T0, source_type=NATIVE) == {6: 0}
     assert builder.history(6) == []
+
+
+def test_recover_strategies_tells_open_routers_their_side():
+    """I4: after recover(), a router carrying a position tells its strategy which side it is
+    on, so the strategy's internal _position matches the book instead of restarting at 0."""
+    mod = load()
+
+    class Recording:
+        def __init__(self): self.calls = []
+        def on_recover(self, sign): self.calls.append(sign)
+
+    class NoHook:
+        pass
+
+    class R:
+        def __init__(self, size, strategy): self.size, self.strategy = Decimal(size), strategy
+
+    long_s, short_s, flat_s, plain = Recording(), Recording(), Recording(), NoHook()
+    routers = {6: R("1", long_s), 7: R("-2", short_s), 8: R("0", flat_s), 9: R("1", plain)}
+    mod._recover_strategies(routers)
+    assert long_s.calls == [1] and short_s.calls == [-1] and flat_s.calls == []

@@ -100,6 +100,18 @@ def seed_history(conn, builder: LiveBarBuilder, wanted: Mapping[int, int], *, no
     return seeded
 
 
+def _recover_strategies(routers: Mapping[int, InstrumentRouter]) -> None:
+    """I4: recover() rebuilt each router's position from the exchange; a Phase 1 strategy also
+    keeps its own _position, which would otherwise restart at 0 and flatten the book on the
+    next bar. Tell it which side it is on (optional hook: skipped when the strategy lacks it)."""
+    for router in routers.values():
+        if router.size == 0:
+            continue
+        hook = getattr(router.strategy, "on_recover", None)
+        if callable(hook):
+            hook(1 if router.size > 0 else -1)
+
+
 async def run_once(args, settings) -> None:
     if args.hypothesis == "h2":
         raise SystemExit("h2 needs a live proxy feed; not wired in Phase 2a")
@@ -134,6 +146,7 @@ async def run_once(args, settings) -> None:
     pf = Portfolio(run_id=run_id, executor=executor, conn=conn, alerter=alerter, routers=routers)
     rep = await recover(conn=conn, run_id=run_id, executor=executor, routers=routers, alerter=alerter)
     log.info("recovery: %s", rep.to_dict())
+    _recover_strategies(routers)
     if args.clear_halt is not None and args.clear_halt in routers:
         routers[args.clear_halt].clear_halt()
         log.warning("cleared HALT on %s by operator request", args.clear_halt)

@@ -24,6 +24,12 @@ class Strategy(Protocol):
         internal position/hold state."""
         ...
 
+    def on_recover(self, position_sign: int) -> None:
+        """OPTIONAL (the harness never calls it; the live router checks with getattr). Called
+        once after a restart when state recovery found an open position: align internal side
+        state with position_sign (-1 / 0 / +1) instead of restarting at flat."""
+        ...
+
 
 def clamp_target(x: Decimal) -> Decimal:
     return max(-ONE, min(ONE, x))

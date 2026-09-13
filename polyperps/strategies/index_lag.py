@@ -45,3 +45,8 @@ class IndexLag:
     def on_flatten(self) -> None:
         self._position = Decimal(0)
         self._held = 0
+
+    def on_recover(self, position_sign: int) -> None:
+        """Live restart (spec 2.4b): the router recovered a position from the exchange; align the
+        internal side with it (-1/0/+1) so the next target() holds instead of restarting at flat."""
+        self._position = Decimal(position_sign)
