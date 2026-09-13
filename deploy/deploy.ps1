@@ -99,7 +99,7 @@ if ($Bootstrap) {
     $BootstrapScript = Join-Path $PSScriptRoot "bootstrap.sh"
 
     Write-Host "== copying deploy/bootstrap.sh to the box =="
-    & $Pscp -load $Session $BootstrapScript "/tmp/bootstrap.sh"
+    & $Pscp -load $Session $BootstrapScript "${Session}:/tmp/bootstrap.sh"
     if ($LASTEXITCODE -ne 0) {
         Write-Error "pscp exited with code $LASTEXITCODE"
         exit $LASTEXITCODE
