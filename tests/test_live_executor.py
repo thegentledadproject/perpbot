@@ -76,7 +76,10 @@ async def test_submit_maps_payload_and_ack():
     ex = LiveExecutor(s, instrument_ids=[6], modes={}, gate=OPEN, clock=lambda: T0)
     ack = await ex.submit(OrderRequest(client_order_id="r-6-1", instrument_id=6, side="buy", quantity=Decimal("0.5"),
                                        reduce_only=False, ts=T0))
-    assert s.calls[0] == ("place_order", {"instrument_id": 6, "side": "buy", "quantity": Decimal("0.5"),
+    # The installed SDK's OrderSide is Literal["BUY", "SELL"] (uppercase; see
+    # .venv/Lib/site-packages/polymarket/models/types.py:6), while our own
+    # OrderRequest.side is "buy"/"sell" -- submit() maps it before the call.
+    assert s.calls[0] == ("place_order", {"instrument_id": 6, "side": "BUY", "quantity": Decimal("0.5"),
                                           "time_in_force": "ioc", "reduce_only": False, "client_order_id": "r-6-1"})
     assert ack.status == "accepted" and ack.exchange_order_id == "777"
 

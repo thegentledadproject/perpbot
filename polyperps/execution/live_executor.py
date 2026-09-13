@@ -21,14 +21,12 @@ verified by reading source, never by calling the network):
       maps long->buy, short->sell to satisfy FillUpdate.side (decision:
       FillUpdate.side is "buy"/"sell"), with an identity fallback for
       already-lowercase buy/sell values (as used by this module's tests).
-  place_order(side=...)                        NOTE, outside the brief's
-      listed verification scope, not changed: OrderSide is
-      Literal["BUY", "SELL"] (polymarket/models/types.py:6), uppercase. This
-      module forwards OrderRequest.side ("buy"/"sell") unchanged, matching
-      the verbatim brief test. Wiring this module to a real PerpsSession will
-      need an uppercase mapping before any live use; flagged here, not fixed,
-      since no test in this phase covers it and Phase 2a never calls the
-      real SDK.
+  place_order(side=...)                        DIFFERS from the brief.
+      .venv/Lib/site-packages/polymarket/models/types.py:6 defines
+      OrderSide = Literal["BUY", "SELL"], uppercase. Our own OrderRequest.side
+      is "buy"/"sell" (polyperps/execution/types.py). submit() below maps
+      "buy"->"BUY", "sell"->"SELL" before calling session.place_order so the
+      payload matches what the installed SDK actually accepts.
 """
 
 from __future__ import annotations
@@ -49,6 +47,7 @@ from polyperps.execution.types import (
 from polyperps.gates import ExecutionMode, GateDecision, live_orders_allowed
 
 _FILL_SIDE_MAP = {"long": "buy", "short": "sell", "buy": "buy", "sell": "sell"}
+_ORDER_SIDE_MAP = {"buy": "BUY", "sell": "SELL"}
 
 
 def _utcnow() -> datetime:
@@ -81,7 +80,7 @@ class LiveExecutor:
     async def submit(self, order: OrderRequest) -> OrderAck:
         try:
             placement = await self._s.place_order(
-                instrument_id=order.instrument_id, side=order.side, quantity=order.quantity,
+                instrument_id=order.instrument_id, side=_ORDER_SIDE_MAP[order.side], quantity=order.quantity,
                 time_in_force="ioc", reduce_only=order.reduce_only, client_order_id=order.client_order_id)
         except RequestRejectedError as exc:
             return OrderAck(client_order_id=order.client_order_id, exchange_order_id=None, status="rejected",
