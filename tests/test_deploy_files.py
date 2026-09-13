@@ -15,9 +15,9 @@ DEPLOY_DIR = REPO_ROOT / "deploy"
 UNIT_FILES = ["polyperps-feed.service", "polyperps-paper.service"]
 SHELL_FILES = ["bootstrap.sh", "update.sh"]
 
-# The five deploy files that must be plain LF text (deploy.ps1 is Windows
-# PowerShell and is exempt from the no-\r check).
-LF_ONLY_FILES = UNIT_FILES + ["env.example"] + SHELL_FILES
+# All deploy files must be plain LF text, deploy.ps1 included - PowerShell
+# 5.1 does not require CRLF, and the repo standardizes on LF everywhere.
+LF_ONLY_FILES = UNIT_FILES + ["env.example"] + SHELL_FILES + ["deploy.ps1"]
 
 LIVE_EXECUTOR_RE = re.compile(r"--executor\s+live")
 

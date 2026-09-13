@@ -37,13 +37,19 @@ chown polyperps:polyperps /var/lib/polyperps
 chmod 700 /etc/credstore
 
 echo "== code =="
+# NOTE: re-running bootstrap.sh does not redeploy new code on an
+# already-bootstrapped box - that is update.sh's job. This only clones
+# (first run) or re-fetches/checks-out REF (later runs) so bootstrap.sh
+# is safe to re-run for the non-code setup below (packages, units, env
+# file). Once /opt/polyperps is chowned to polyperps, git refuses to
+# operate on it as root ("detected dubious ownership"), so every git
+# call after the chown runs as the polyperps user, same as update.sh.
 if [ ! -d /opt/polyperps/.git ]; then
   git clone "$REPO_URL" /opt/polyperps
-else
-  git -C /opt/polyperps fetch --prune origin
 fi
-git -C /opt/polyperps checkout "$REF"
 chown -R polyperps:polyperps /opt/polyperps
+sudo -u polyperps git -C /opt/polyperps fetch --prune origin
+sudo -u polyperps git -C /opt/polyperps checkout "$REF"
 
 echo "== venv =="
 sudo -u polyperps bash -c '
@@ -62,9 +68,14 @@ if [ ! -f /etc/polyperps/env ]; then
 fi
 
 echo "== systemd units =="
-cp /opt/polyperps/deploy/polyperps-feed.service /etc/systemd/system/polyperps-feed.service
-cp /opt/polyperps/deploy/polyperps-paper.service /etc/systemd/system/polyperps-paper.service
-systemctl daemon-reload
+# Gate the copy on content so a re-run of bootstrap.sh doesn't clobber an
+# operator's uncommented LoadCredential= lines in the installed paper unit.
+for unit in polyperps-feed.service polyperps-paper.service; do
+  if ! cmp -s "/opt/polyperps/deploy/${unit}" "/etc/systemd/system/${unit}"; then
+    cp "/opt/polyperps/deploy/${unit}" "/etc/systemd/system/${unit}"
+    systemctl daemon-reload
+  fi
+done
 systemctl enable polyperps-feed polyperps-paper
 
 cat <<'EOF'
