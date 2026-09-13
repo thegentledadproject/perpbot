@@ -82,3 +82,29 @@ def test_verdict_labels():
     assert verdict_label(Allow()) == "allow"
     assert verdict_label(Resize(quantity=Decimal("1.5"))) == "resize:1.5"
     assert verdict_label(Reject(reason="x")) == "reject:x"
+
+
+# --- final review minors: the short side goes through the same guards -----------------------
+
+
+def test_short_entry_vetted_by_gross_notional_like_a_long():
+    # an existing SHORT counts as gross notional too: equity 1000, short 2500, intent 1000 -> resize to 500
+    v = vet_entry(intent("1000"), mark=Decimal(100), snapshot=snap(positions=[pos(7, "2500", size_sign=-1)]))
+    assert v == Resize(quantity=Decimal("5.00000000"))
+    assert isinstance(vet_entry(intent("100"), mark=Decimal(100),
+                                snapshot=snap(positions=[pos(7, "3000", size_sign=-1)])), Reject)
+
+
+def test_check_open_short_side_liquidation_distance():
+    # short from 100: liquidation ABOVE the mark; distance measured the same way
+    assert check_open(pos(6, "100", size_sign=-1, liq="120"), mark=Decimal(100)) == "flatten"   # 20 % away
+    assert check_open(pos(6, "100", size_sign=-1, liq="130"), mark=Decimal(100)) == "hold"      # 30 % away
+    assert check_open(pos(6, "100", size_sign=-1, liq="120"), mark=Decimal(90)) == "hold"       # rallied away: 33 %
+    assert check_open(pos(6, "100", size_sign=-1, liq="120"), mark=Decimal(110)) == "flatten"   # squeezed: 9 %
+
+
+def test_funding_exit_due_short_side():
+    # a short PAYS when funding is negative: cumulative_funding is what we received, so paid = -it
+    assert funding_exit_due(pos(6, "100", size_sign=-1, funding="-2")) is True
+    assert funding_exit_due(pos(6, "100", size_sign=-1, funding="-1.99")) is False
+    assert funding_exit_due(pos(6, "100", size_sign=-1, funding="3")) is False   # shorts collecting positive funding

@@ -100,9 +100,15 @@ exit, gross exposure 1.0x / cluster net 0.6x equity, kill-switch thresholds `Non
 
 | Step | Command |
 |------|---------|
-| 48 h paper run | `POLYPERPS_INSTRUMENT_IDS=6,7 scripts/run_paper.py --executor sim --hypothesis h1` |
-| clear a halted instrument (human decision) | add `--clear-halt 6` to the run command |
+| 48 h paper run | `POLYPERPS_INSTRUMENT_IDS=6,7 .venv/Scripts/python scripts/run_paper.py --executor sim --hypothesis h1 --run-id soak-2026-09-13` |
+| clear a halted (or liquidated) instrument (human decision) | add `--clear-halt 6` to the run command |
 | Telegram CRITICAL alerts (optional) | store `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` via `key_management` |
+
+`--run-id` is required for a soak: it names the paper account and the rows recovery
+reads, so a restart (manual or the built-in supervisor) reopens the same book. Without
+it a fresh id is minted per process start. Strategy warm-up is seeded from stored 1h
+candles at start (`seeded N bars for instrument I` in the log); until the history is
+long enough the router writes `skip:warmup` decisions and sends nothing.
 
 `--executor live` exits 2 in Phase 2a. `LiveExecutor` cannot be constructed
 unless all three locks are open; the kill switch refuses to `run` live while its

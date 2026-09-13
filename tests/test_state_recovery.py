@@ -136,3 +136,43 @@ async def test_adopted_resting_order_keeps_pending_bookkeeping():
                                          price=Decimal("100.08"), fee=Decimal("0.04"), ts=T0))
     assert router.state is State.OPEN
     assert not any(a[2] == "unexpected_fill" for a in list_alerts(conn, "r"))
+
+
+# --- final review I8: adopting a position we have no local record of ------------------------
+
+
+async def test_adopting_untracked_position_warns_and_is_reported():
+    """No local row at all (or a FLAT one) but the venue holds a position: still adopt it under
+    a fresh stop - the exchange is truth - but say so loudly and record it in the findings."""
+    conn, ex, alerter, router = setup()
+    await ex.submit(OrderRequest(client_order_id="elsewhere", instrument_id=6, side="sell", quantity=Decimal(2),
+                                 reduce_only=False, ts=T0)); ex.drain_events()
+    rep = await recover(conn=conn, run_id="r", executor=ex, routers={6: router}, alerter=alerter, clock=lambda: T0)
+    assert router.state is State.OPEN and router.size == -2 and rep.stops_replaced == [6]
+    assert rep.adopted_untracked == [6]
+    assert list_recovery(conn, "r")[0][1]["adopted_untracked"] == [6]
+    warn = [a for a in list_alerts(conn, "r") if a[2] == "adopted_untracked"]
+    assert len(warn) == 1 and warn[0][1] == "WARN" and warn[0][3] == 6
+    assert warn[0][4] == {"instrument_id": "6", "size": "-2", "entry": "99.92"}
+
+
+async def test_adopting_position_over_flat_local_row_also_warns():
+    conn, ex, alerter, router = setup()
+    upsert_position_local(conn, PositionLocalRow(run_id="r", instrument_id=6, state=State.FLAT, size=Decimal(0),
+                                                 entry_price=None, stop_trigger=None, stop_order_id=None,
+                                                 cumulative_funding=Decimal(0), updated_at=T0))
+    await ex.submit(OrderRequest(client_order_id="elsewhere", instrument_id=6, side="buy", quantity=Decimal(1),
+                                 reduce_only=False, ts=T0)); ex.drain_events()
+    rep = await recover(conn=conn, run_id="r", executor=ex, routers={6: router}, alerter=alerter, clock=lambda: T0)
+    assert rep.adopted_untracked == [6] and router.state is State.OPEN
+
+
+async def test_adopting_position_over_pending_or_open_row_is_not_untracked():
+    conn, ex, alerter, router = setup()
+    await ex.submit(OrderRequest(client_order_id="r-6-1", instrument_id=6, side="buy", quantity=Decimal(1),
+                                 reduce_only=False, ts=T0)); ex.drain_events()
+    upsert_position_local(conn, PositionLocalRow(run_id="r", instrument_id=6, state=State.ENTRY_PENDING, size=Decimal(0),
+                                                 entry_price=None, stop_trigger=None, stop_order_id=None,
+                                                 cumulative_funding=Decimal(0), updated_at=T0))
+    rep = await recover(conn=conn, run_id="r", executor=ex, routers={6: router}, alerter=alerter, clock=lambda: T0)
+    assert rep.adopted_untracked == [] and not any(a[2] == "adopted_untracked" for a in list_alerts(conn, "r"))

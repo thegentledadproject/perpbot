@@ -26,13 +26,14 @@ class RecoveryReport:
     cancelled: list[str] = field(default_factory=list)
     stops_replaced: list[int] = field(default_factory=list)
     unknown_positions: list[int] = field(default_factory=list)
+    adopted_untracked: list[int] = field(default_factory=list)   # I8: venue position, no/FLAT local row
     states: dict[int, str] = field(default_factory=dict)
     failed: str | None = None
 
     def to_dict(self) -> dict:
         return {"adopted": self.adopted, "abandoned": self.abandoned, "cancelled": self.cancelled,
                 "stops_replaced": self.stops_replaced, "unknown_positions": self.unknown_positions,
-                "states": self.states, "failed": self.failed}
+                "adopted_untracked": self.adopted_untracked, "states": self.states, "failed": self.failed}
 
 
 def _utcnow() -> datetime:
@@ -68,6 +69,13 @@ async def recover(
                 continue
             pos = snap.position(iid)
             if pos is not None and pos.size != 0:
+                if row is None or row.state is State.FLAT:
+                    # I8: we never recorded opening this. The exchange is truth, so adopt it under
+                    # a fresh stop - but an operator must know the book moved without us.
+                    rep.adopted_untracked.append(iid)
+                    alerter.emit(Alert(level="WARN", kind="adopted_untracked", instrument_id=iid,
+                                       detail={"instrument_id": str(iid), "size": str(pos.size),
+                                               "entry": str(pos.entry_price)}, ts=clock()))
                 router.size, router.entry, router.cumulative_funding = pos.size, pos.entry_price, pos.cumulative_funding
                 router.state = State.OPEN
                 router._persist()
