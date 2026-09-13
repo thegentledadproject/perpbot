@@ -89,3 +89,21 @@ names a `passed=True` native record **and** carries `approved_by`/`approved_at`
 Since the 2026-09-12 amendment (spec §8.3) `passed` also requires zero hourly-open
 fallback fills on the holdout and a backtested span of at least 60 days, and the
 gate re-checks those from the record rather than trusting the flag.
+
+## Phase 2a — paper execution (no live orders)
+
+Spec: `docs/superpowers/specs/2026-09-12-polyperps-phase2a-design.md`. The router,
+guards, reconciliation, recovery, and alerts run on the exact path a live run
+would, with `SimExecutor` as the last mile. Pre-registered limits: 3x leverage,
+25 % liquidation-distance floor, 15 % exchange-side stop, 2 % funding-cost
+exit, gross exposure 1.0x / cluster net 0.6x equity, kill-switch thresholds `None`.
+
+| Step | Command |
+|------|---------|
+| 48 h paper run | `POLYPERPS_INSTRUMENT_IDS=6,7 scripts/run_paper.py --executor sim --hypothesis h1` |
+| clear a halted instrument (human decision) | add `--clear-halt 6` to the run command |
+| Telegram CRITICAL alerts (optional) | store `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` via `key_management` |
+
+`--executor live` exits 2 in Phase 2a. `LiveExecutor` cannot be constructed
+unless all three locks are open; the kill switch refuses to `run` live while its
+thresholds are `None` (set in Phase 2b from a passing native record).
