@@ -5,6 +5,7 @@ open_ts + 1h - the same convention bars.build_bars uses (see Phase 1 spec sectio
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Sequence
 from datetime import datetime
 from decimal import Decimal
 
@@ -55,6 +56,14 @@ class LiveBarBuilder:
             return closed
         acc.add(tick)
         return None
+
+    def seed(self, instrument_id: int, bars: Sequence[Bar]) -> None:
+        """Append pre-built CLOSED bars (e.g. from stored candles) to an instrument's history so
+        the strategy's warm-up is already paid when the first live hour closes. Respects
+        max_history; the open accumulator is untouched."""
+        h = self._hist[instrument_id]
+        h.extend(bars)
+        del h[:-self._max]
 
     def history(self, instrument_id: int) -> list[Bar]:
         return list(self._hist[instrument_id])

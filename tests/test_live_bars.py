@@ -41,3 +41,17 @@ def test_close_all_on_shutdown():
     b.on_tick(tick(5, "100"))
     (bar,) = b.close_all(T0 + timedelta(minutes=10))
     assert bar.close == Decimal(100) and b.history(6) == [bar]
+
+
+def test_seed_prepends_closed_history_and_respects_cap():
+    b = LiveBarBuilder(max_history=3)
+    pre = [b.on_tick(tick(60 * h + 1, "100")) for h in range(5)]      # closes hours 0..3
+    stored = [x for x in pre if x is not None]
+    assert len(stored) == 4
+    b2 = LiveBarBuilder(max_history=3)
+    b2.seed(6, stored)
+    assert b2.history(6) == stored[-3:]
+    assert b2.on_tick(tick(60 * 4 + 1, "101")) is None                  # live hour 4 opens
+    closed = b2.on_tick(tick(60 * 5 + 1, "101"))                         # ...and closes on the next hour's tick
+    assert closed is not None and b2.history(6) == stored[-2:] + [closed]
+    assert b2.history(7) == []                                           # other instruments untouched

@@ -132,6 +132,11 @@ class InstrumentRouter:
             self._alert("CRITICAL", "kill_switch", action="shutdown")
             self._set_state(State.HALTED)
             return
+        if len(history) < getattr(self.strategy, "warmup", 0):
+            # Same rule as the backtest harness: no target call until the strategy has its
+            # lookback. run_paper seeds history from stored candles so this is normally brief.
+            self._record(target=None, verdicts={}, intent=None, cid=None, note="skip:warmup")
+            return
         target = clamp_target(self.strategy.target(history))
         if self.state is State.FLAT:
             if target == 0 or kill == "pause":

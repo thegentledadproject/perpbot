@@ -14,12 +14,16 @@ import contextlib
 import logging
 import signal
 import sys
-from datetime import datetime, timezone
+from collections.abc import Mapping
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
+from polyperps.backtest.bars import build_bars, floor_hour
 from polyperps.config import load_settings
 from polyperps.data_ingest.market_feed import MarketFeed
 from polyperps.exchange.client import PolymarketPerpsClient
+from polyperps.exchange.types import SourceType
 from polyperps.execution.live_bars import LiveBarBuilder
 from polyperps.execution.order_router import InstrumentRouter, Portfolio
 from polyperps.execution.sim_executor import SimExecutor
@@ -28,6 +32,7 @@ from polyperps.gates import ExecutionMode, live_orders_allowed
 from polyperps.monitor.alerts import Alerter, LogSink, SqliteSink, TelegramSink
 from polyperps.risk.kill_switch import evaluate as kill_evaluate
 from polyperps.security.key_management import SecretUnavailable, load_secret
+from polyperps.signal.sufficiency import BAR
 from polyperps.signal.validation_log import read_records
 from polyperps.storage import db
 from polyperps.strategies import GRIDS, build_strategy
@@ -37,6 +42,8 @@ HEARTBEAT_S = 20
 RECONCILE_S = 60
 INITIAL_BACKOFF_S = 1.0
 MAX_BACKOFF_S = 60.0
+_HOUR = timedelta(hours=1)
+_SEED_WINDOW_FACTOR = 2   # scan 2x the wanted hours so gaps in stored candles still yield N complete bars
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -71,6 +78,26 @@ def _alerter(run_id: str, conn) -> Alerter:
     except SecretUnavailable:
         log.info("telegram sink not configured")
     return Alerter(run_id, sinks)
+
+
+def seed_history(conn, builder: LiveBarBuilder, wanted: Mapping[int, int], *, now: datetime,
+                 source_type: SourceType = SourceType.POLYMARKET_REST) -> dict[int, int]:
+    """C3: pay the strategy's warm-up from stored 1h candles (Phase 1 build_bars) instead of
+    waiting `lookback` live hours. Per instrument, the last `wanted[iid]` COMPLETE bars strictly
+    before the current hour are appended to the builder; spread is normalised to the constant
+    proxy the live builder stamps. Zero bars is fine - the router's warmup gate covers it."""
+    end = floor_hour(now)
+    seeded: dict[int, int] = {}
+    for iid, n in wanted.items():
+        bars = []
+        if n > 0:
+            raw = build_bars(conn, iid, source_type, start=end - n * _SEED_WINDOW_FACTOR * _HOUR, end=end)
+            bars = [replace(b, spread_bps=BAR.proxy_spread_bps, spread_source="constant")
+                    for b in raw if b.complete][-n:]
+            builder.seed(iid, bars)
+        seeded[iid] = len(bars)
+        log.info("seeded %d bars for instrument %d", len(bars), iid)
+    return seeded
 
 
 async def run_once(args, settings) -> None:
@@ -112,6 +139,9 @@ async def run_once(args, settings) -> None:
         log.warning("cleared HALT on %s by operator request", args.clear_halt)
 
     builder = LiveBarBuilder()
+    warm = max(int(getattr(routers[i].strategy, "warmup", 0) or 0) for i in settings.instrument_ids) if routers else 0
+    seed_history(conn, builder, {i: max(warm, int(params.get("lookback", 0))) for i in settings.instrument_ids},
+                 now=datetime.now(timezone.utc))
     marks: dict[int, Decimal] = {}
     closed_bars: asyncio.Queue = asyncio.Queue()
     stop = asyncio.Event()

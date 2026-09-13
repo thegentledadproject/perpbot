@@ -1,7 +1,17 @@
 import importlib.util
 import sys
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 import pytest
+
+from polyperps.exchange.types import Candle, FundingObservation, SourceType
+from polyperps.execution.live_bars import LiveBarBuilder
+from polyperps.storage.db import connect, insert_candle, insert_funding
+
+T0 = datetime(2026, 9, 12, 0, 0, tzinfo=timezone.utc)
+H = timedelta(hours=1)
+NATIVE = SourceType.POLYMARKET_REST
 
 
 def load():
@@ -54,3 +64,43 @@ def test_run_id_minted_once_across_supervised_restarts(monkeypatch, tmp_path):
         mod.main()
     assert len(seen) == 2 and seen[0] == seen[1]
     assert seen[0].startswith("paper-")
+
+
+def _candle(ts, close="100"):
+    return Candle(instrument_id=6, interval="1h", open_ts=ts, open=Decimal("99"), high=Decimal("101"),
+                  low=Decimal("98"), close=Decimal(close), volume=Decimal("1"), trades=1, received_ts=ts,
+                  source_type=NATIVE)
+
+
+def _funding(ts, rate="0.0001"):
+    return FundingObservation(instrument_id=6, funding_rate=Decimal(rate), exchange_ts=ts, received_ts=ts,
+                              source_type=NATIVE)
+
+
+def test_seed_history_loads_closed_complete_bars_from_stored_candles():
+    """C3: the strategy's warm-up is paid from stored 1h candles instead of waiting `lookback`
+    hours of live ticks. Only complete (candle + funding) bars strictly before the current hour
+    count; spread is the constant proxy the live builder also stamps."""
+    mod = load()
+    conn = connect(":memory:")
+    now = T0 + 6 * H + timedelta(minutes=20)              # hour 6 is open: must not be seeded
+    for h in range(7):
+        insert_candle(conn, _candle(T0 + h * H, close=str(100 + h)))
+        if h != 2:                                         # hour 2 has no settlement row -> incomplete
+            insert_funding(conn, _funding(T0 + (h + 1) * H))
+    builder = LiveBarBuilder()
+    counts = mod.seed_history(conn, builder, {6: 4, 7: 4}, now=now, source_type=NATIVE)
+    hist = builder.history(6)
+    assert counts == {6: 4, 7: 0} and len(hist) == 4
+    assert [b.open_ts for b in hist] == [T0 + h * H for h in (1, 3, 4, 5)]
+    assert all(b.complete and b.spread_source == "constant" for b in hist)
+    assert hist[-1].close == Decimal(105) and hist[-1].funding_rate == Decimal("0.0001")
+    assert builder.history(7) == []
+
+
+def test_seed_history_zero_bars_is_fine():
+    mod = load()
+    conn = connect(":memory:")
+    builder = LiveBarBuilder()
+    assert mod.seed_history(conn, builder, {6: 48}, now=T0, source_type=NATIVE) == {6: 0}
+    assert builder.history(6) == []

@@ -349,3 +349,24 @@ async def test_portfolio_lock_serialises_fill_handling_against_reconcile():
     assert "stop_missing" not in kinds(conn)
     assert kinds(conn).count("stop_placed") == 1
     assert router.state is State.OPEN and (await ex.snapshot()).stops == {6: router.stop_trigger}
+
+
+# --- final review: C3 warmup gate ------------------------------------------------------------
+
+
+def test_ack_timeout_default_pinned():
+    conn, ex, strat, router, pf = make()
+    assert router.ack_timeout_s == 10.0
+
+
+async def test_warmup_gate_skips_until_history_is_long_enough():
+    conn, ex, strat, router, pf = make()
+    strat.warmup = 3
+    calls = []
+    strat.target = lambda history: calls.append(len(history)) or Decimal(1)
+    await pf.on_bar({6: [bar(0)]}, "run")
+    await pf.on_bar({6: [bar(0), bar(1)]}, "run")
+    assert [d.note for d in list_decisions(conn, "r", 6)] == ["skip:warmup", "skip:warmup"]
+    assert calls == [] and get_order(conn, "r-6-1") is None and router.state is State.FLAT
+    await pf.on_bar({6: [bar(0), bar(1), bar(2)]}, "run")
+    assert calls == [3] and router.state is State.ENTRY_PENDING
