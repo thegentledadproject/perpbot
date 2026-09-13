@@ -60,4 +60,10 @@ class LiveBarBuilder:
         return list(self._hist[instrument_id])
 
     def close_all(self, now: datetime) -> list[Bar]:
+        """Force-close every open accumulator, stamping each partial hour complete=True.
+
+        Not called by run_paper.py on shutdown - the partial hour would be delivered
+        to the router as a complete bar it isn't, poisoning strategy history. Kept for
+        tests/tools that want a deterministic flush (e.g. an offline replay harness).
+        """
         return [self._close(iid) for iid in list(self._acc)]

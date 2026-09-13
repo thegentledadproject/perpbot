@@ -159,6 +159,9 @@ async def run_once(args, settings) -> None:
         await feed.run()
     finally:
         stop.set()
+        # Deliberately not flushing builder.close_all() here: the currently-open hour is
+        # partial, and close_all() stamps whatever it has as complete=True. Dropping it
+        # is correct - it picks back up on the next tick after restart.
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
