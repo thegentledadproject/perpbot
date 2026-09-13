@@ -38,4 +38,4 @@ systemctl restart polyperps-feed polyperps-paper
 
 systemctl --no-pager status polyperps-feed polyperps-paper || true
 
-echo "deployed commit: $(git rev-parse --short HEAD)"
+echo "deployed commit: $(sudo -u polyperps git rev-parse --short HEAD)"

@@ -136,7 +136,14 @@ Then on the box: edit `/etc/polyperps/env` (instrument ids, db path,
 hypothesis, run id); optionally drop `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`
 into `/etc/credstore/` (root:root 0600) and uncomment the two `LoadCredential=`
 lines in `/etc/systemd/system/polyperps-paper.service` (then
-`systemctl daemon-reload`); then `systemctl start polyperps-feed polyperps-paper`.
+`systemctl daemon-reload`); run the one-time data setup as the service user
+(the paper run refuses to start without a fee row, and seeds its strategy
+history from stored 1h candles):
+
+    cd /opt/polyperps && sudo -u polyperps env $(grep -v '^#' /etc/polyperps/env | xargs) .venv/bin/python scripts/store_fees.py
+    cd /opt/polyperps && sudo -u polyperps env $(grep -v '^#' /etc/polyperps/env | xargs) .venv/bin/python scripts/backfill.py --days 31 --interval 1h
+
+then `systemctl start polyperps-feed polyperps-paper`.
 
 **Every later deploy**:
 

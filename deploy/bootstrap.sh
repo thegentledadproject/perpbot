@@ -85,9 +85,13 @@ cat <<'EOF'
 2. Optionally drop Telegram secrets into /etc/credstore/ (root:root 0600)
    and uncomment the LoadCredential= lines in
    /etc/systemd/system/polyperps-paper.service, then: systemctl daemon-reload
-3. Start the services:
+3. One-time data setup as the service user (the paper run refuses to start
+   without a stored fee row, and seeds its strategy history from candles):
+     cd /opt/polyperps && sudo -u polyperps env $(grep -v '^#' /etc/polyperps/env | xargs)        .venv/bin/python scripts/store_fees.py
+     cd /opt/polyperps && sudo -u polyperps env $(grep -v '^#' /etc/polyperps/env | xargs)        .venv/bin/python scripts/backfill.py --days 31 --interval 1h
+4. Start the services:
      systemctl start polyperps-feed polyperps-paper
-4. Watch them:
+5. Watch them:
      journalctl -fu polyperps-feed
      journalctl -fu polyperps-paper
 EOF
