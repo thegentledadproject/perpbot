@@ -98,10 +98,10 @@ if ($Bootstrap) {
 
     Write-Host "== copying deploy/bootstrap.sh to the box =="
     # Stream the script over plink's stdin instead of pscp: pscp cannot take
-    # a saved-session name as the remote host. The remote sed strips any CR
-    # the Windows pipe may add so bash never sees CRLF.
+    # a saved-session name as the remote host. `tr` strips the CR the Windows
+    # pipe appends, inline, so bash never sees CRLF.
     $bootstrapText = [System.IO.File]::ReadAllText($BootstrapScript)
-    $bootstrapText | & $Plink -load $Session -batch "cat > /tmp/bootstrap.sh && sed -i 's/$//' /tmp/bootstrap.sh"
+    $bootstrapText | & $Plink -load $Session -batch "tr -d '\r' > /tmp/bootstrap.sh"
     if ($LASTEXITCODE -ne 0) {
         Write-Error "plink (copy bootstrap.sh) exited with code $LASTEXITCODE"
         exit $LASTEXITCODE
