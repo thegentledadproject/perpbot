@@ -1,0 +1,26 @@
+[Unit]
+Description=polyperps market feed (Spec 0.3 continuous data ingest)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=polyperps
+Group=polyperps
+WorkingDirectory=/opt/polyperps
+EnvironmentFile=/etc/polyperps/env
+ExecStart=/opt/polyperps/.venv/bin/python scripts/run_feed.py
+Restart=on-failure
+RestartSec=10
+KillSignal=SIGTERM
+TimeoutStopSec=30
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/polyperps
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

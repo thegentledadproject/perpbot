@@ -113,3 +113,44 @@ long enough the router writes `skip:warmup` decisions and sends nothing.
 `--executor live` exits 2 in Phase 2a. `LiveExecutor` cannot be constructed
 unless all three locks are open; the kill switch refuses to `run` live while its
 thresholds are `None` (set in Phase 2b from a passing native record).
+
+## Deploy (EC2, systemd, PuTTY)
+
+Files: `deploy/bootstrap.sh` (first-time box setup), `deploy/update.sh` (redeploy
+a running box), `deploy/deploy.ps1` (driver, run from this machine over PuTTY),
+`deploy/*.service` (systemd units, `--executor sim` only - never `live`),
+`deploy/env.example` (non-secret settings). `tests/test_deploy_files.py` checks
+all of the above never enable live trading or leak a script path that doesn't
+exist.
+
+**Prerequisites**: a fresh EC2 instance, Ubuntu 24.04, in a **non-US region**
+(jurisdiction, per the eligibility checklist); a security group open for SSH
+only; a PuTTY saved session (`-load <name>`) already configured with that
+host's key.
+
+**First time**:
+
+    deploy\deploy.ps1 -Session <name> -Bootstrap -RepoUrl <git-url>
+
+Then on the box: edit `/etc/polyperps/env` (instrument ids, db path,
+hypothesis, run id); optionally drop `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`
+into `/etc/credstore/` (root:root 0600) and uncomment the two `LoadCredential=`
+lines in `/etc/systemd/system/polyperps-paper.service` (then
+`systemctl daemon-reload`); then `systemctl start polyperps-feed polyperps-paper`.
+
+**Every later deploy**:
+
+    deploy\deploy.ps1 -Session <name>
+
+Refuses to run against a dirty working tree or an unpushed commit.
+
+**Watching**: `journalctl -fu polyperps-paper` (or `-feed`); `deploy.ps1` also
+tails the last 40 lines of both units after every deploy.
+
+**Stopping**: `systemctl stop polyperps-feed polyperps-paper` sends SIGTERM;
+both scripts unwind through their `finally` block cleanly (see the soak
+runbook above).
+
+After the first successful feed run from the EC2 box, add the egress-IP row
+to `docs/ops/eligibility-checklist.md` - the geo-block check is host-specific
+and the Malaysia-ISP entry there does not cover EC2.

@@ -1,0 +1,30 @@
+[Unit]
+Description=polyperps paper execution (Phase 2a, SimExecutor only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=polyperps
+Group=polyperps
+WorkingDirectory=/opt/polyperps
+EnvironmentFile=/etc/polyperps/env
+# Telegram alert secrets (optional). Uncomment once the files exist
+# (root:root 0600) - see polyperps/security/key_management.py.
+#LoadCredential=TELEGRAM_BOT_TOKEN:/etc/credstore/TELEGRAM_BOT_TOKEN
+#LoadCredential=TELEGRAM_CHAT_ID:/etc/credstore/TELEGRAM_CHAT_ID
+ExecStart=/opt/polyperps/.venv/bin/python scripts/run_paper.py --executor sim --hypothesis ${PAPER_HYPOTHESIS} --run-id ${PAPER_RUN_ID}
+Restart=on-failure
+RestartSec=10
+KillSignal=SIGTERM
+TimeoutStopSec=30
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/polyperps
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
