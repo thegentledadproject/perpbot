@@ -1,13 +1,13 @@
 <#
 .SYNOPSIS
-    Deploy polyperps to an EC2 box over PuTTY (plink/pscp), or bootstrap a
+    Deploy polyperps to an EC2 box over PuTTY (plink), or bootstrap a
     fresh box for the first time. Windows PowerShell 5.1 compatible.
 
 .DESCRIPTION
     First deploy:   deploy.ps1 -Session <s> -Bootstrap -RepoUrl <url> [-Ref <ref>]
     Later deploys:  deploy.ps1 -Session <s> [-Ref <ref>]
 
-    Never runs a network call from this machine other than plink/pscp
+    Never runs a network call from this machine other than plink
     against the named PuTTY saved session, and never sets
     POLYMARKET_LIVE_TRADING or passes --executor live anywhere.
 #>
@@ -21,9 +21,7 @@ param(
 
     [string]$Ref = "master",
 
-    [string]$Plink = "C:\Program Files\PuTTY\plink.exe",
-
-    [string]$Pscp = "C:\Program Files\PuTTY\pscp.exe"
+    [string]$Plink = "C:\Program Files\PuTTY\plink.exe"
 )
 
 $ErrorActionPreference = "Stop"
@@ -99,9 +97,13 @@ if ($Bootstrap) {
     $BootstrapScript = Join-Path $PSScriptRoot "bootstrap.sh"
 
     Write-Host "== copying deploy/bootstrap.sh to the box =="
-    & $Pscp -load $Session $BootstrapScript "${Session}:/tmp/bootstrap.sh"
+    # Stream the script over plink's stdin instead of pscp: pscp cannot take
+    # a saved-session name as the remote host. The remote sed strips any CR
+    # the Windows pipe may add so bash never sees CRLF.
+    $bootstrapText = [System.IO.File]::ReadAllText($BootstrapScript)
+    $bootstrapText | & $Plink -load $Session -batch "cat > /tmp/bootstrap.sh && sed -i 's/$//' /tmp/bootstrap.sh"
     if ($LASTEXITCODE -ne 0) {
-        Write-Error "pscp exited with code $LASTEXITCODE"
+        Write-Error "plink (copy bootstrap.sh) exited with code $LASTEXITCODE"
         exit $LASTEXITCODE
     }
 
