@@ -139,3 +139,74 @@ def account_and_positions(
         "kill_switch": "unarmed",   # Phase 2a: thresholds are None (risk/kill_switch.py)
     }
     return account, positions
+
+
+_HALT_STATES = (State.HALTED, State.LIQUIDATED)
+
+
+def _halted(conn, run_id: str) -> list[int]:
+    local = db.get_positions_local(conn, run_id)
+    return sorted(iid for iid, row in local.items() if row.state in _HALT_STATES)
+
+
+def guards(conn, *, run_id: str, account: dict | None, positions: list[dict]) -> dict:
+    margin = "ok"
+    for ts, level, kind, _iid, _detail in reversed(db.list_alerts(conn, run_id)):
+        if kind == "margin_ratio":
+            margin = level
+            break
+    liquidation = "ok"
+    if any(p["liq_distance"] < _f(LIMITS.min_liq_distance) for p in positions):
+        liquidation = "breach"
+    exposure = "ok"
+    if account is not None:
+        if account["gross_exposure"] > _f(EXPOSURE.gross):
+            exposure = "breach"
+        cn = account["cluster_net"]
+        if cn is not None and cn > _f(EXPOSURE.cluster_net):
+            exposure = "breach"
+    recovery = db.list_recovery(conn, run_id)
+    reconciliation = None
+    if recovery:
+        ts, findings = recovery[-1]
+        reconciliation = {"findings": len(findings), "at": _iso(ts)}
+    return {
+        "margin": margin,
+        "liquidation": liquidation,
+        "exposure": exposure,
+        "halted": _halted(conn, run_id),
+        "reconciliation": reconciliation,
+    }
+
+
+def recent_decisions(conn, *, run_id: str, instrument_ids, limit: int = 50) -> list[dict]:
+    rows = []
+    for iid in instrument_ids:
+        rows.extend(db.list_decisions(conn, run_id, iid))
+    rows.sort(key=lambda r: r.ts, reverse=True)
+    return [
+        {
+            "ts": _iso(r.ts),
+            "instrument_id": r.instrument_id,
+            "note": r.note,
+            "state_before": str(r.state_before),
+            "target": _s(r.target) if r.target is not None else None,
+            "verdicts": dict(r.verdicts),
+            "client_order_id": r.client_order_id,
+        }
+        for r in rows[:limit]
+    ]
+
+
+def recent_alerts(conn, *, run_id: str, limit: int = 50) -> list[dict]:
+    rows = list(reversed(db.list_alerts(conn, run_id)))[:limit]
+    return [
+        {"ts": _iso(ts), "level": level, "kind": kind, "instrument_id": iid, "detail": detail}
+        for ts, level, kind, iid, detail in rows
+    ]
+
+
+def is_clean(conn, *, run_id: str) -> bool:
+    if _halted(conn, run_id):
+        return False
+    return not any(level == "CRITICAL" for _ts, level, _k, _i, _d in db.list_alerts(conn, run_id))

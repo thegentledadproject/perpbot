@@ -10,10 +10,13 @@ import pytest
 from polyperps.dashboard import state as st
 from polyperps.exchange.types import Instrument
 from polyperps.execution.sim_executor import SimExecutor
-from polyperps.execution.types import OrderRow, PositionLocalRow, State
+from polyperps.execution.types import DecisionRow, OrderRow, PositionLocalRow, State
 from polyperps.storage.db import (
     connect,
     get_positions_local,
+    insert_alert,
+    insert_decision,
+    insert_recovery,
     save_sim_account,
     upsert_order,
     upsert_position_local,
@@ -141,3 +144,98 @@ def test_unknown_instruments_fall_back():
 def test_no_sim_account_yet():
     conn = connect(":memory:")
     assert st.account_and_positions(conn, run_id=RUN, instruments=INSTRUMENTS) == (None, [])
+
+
+def test_guards_ok_when_quiet():
+    conn = seeded_conn()
+    account, positions = st.account_and_positions(conn, run_id=RUN, instruments=INSTRUMENTS)
+    g = st.guards(conn, run_id=RUN, account=account, positions=positions)
+    assert g == {
+        "margin": "ok", "liquidation": "ok", "exposure": "ok",
+        "halted": [], "reconciliation": None,
+    }
+
+
+def test_guards_margin_follows_latest_alert():
+    conn = seeded_conn()
+    insert_alert(conn, run_id=RUN, level="WARN", kind="margin_ratio", instrument_id=6,
+                 detail_json="{}", ts=T0 - timedelta(minutes=5))
+    insert_alert(conn, run_id=RUN, level="INFO", kind="margin_ratio", instrument_id=6,
+                 detail_json="{}", ts=T0 - timedelta(minutes=1))
+    insert_alert(conn, run_id=RUN, level="CRITICAL", kind="pnl_drawdown", instrument_id=None,
+                 detail_json="{}", ts=T0)
+    account, positions = st.account_and_positions(conn, run_id=RUN, instruments=INSTRUMENTS)
+    g = st.guards(conn, run_id=RUN, account=account, positions=positions)
+    assert g["margin"] == "INFO"          # latest margin_ratio row, not the CRITICAL pnl one
+
+
+def test_guards_halted_and_reconciliation():
+    conn = seeded_conn()
+    upsert_position_local(conn, PositionLocalRow(
+        run_id=RUN, instrument_id=7, state=State.HALTED, size=Decimal("0"),
+        entry_price=None, stop_trigger=None, stop_order_id=None,
+        cumulative_funding=Decimal("0"), updated_at=T0))
+    insert_recovery(conn, run_id=RUN, ts=T0, findings_json=json.dumps({"stop_missing": [6]}))
+    account, positions = st.account_and_positions(conn, run_id=RUN, instruments=INSTRUMENTS)
+    g = st.guards(conn, run_id=RUN, account=account, positions=positions)
+    assert g["halted"] == [7]
+    assert g["reconciliation"] == {"findings": 1, "at": T0.isoformat()}
+
+
+def test_guards_breach_flags():
+    conn = seeded_conn()
+    account, positions = st.account_and_positions(conn, run_id=RUN, instruments=INSTRUMENTS)
+    positions[0]["liq_distance"] = 0.20
+    account["gross_exposure"] = 1.2
+    g = st.guards(conn, run_id=RUN, account=account, positions=positions)
+    assert g["liquidation"] == "breach"
+    assert g["exposure"] == "breach"
+
+
+def test_recent_decisions_newest_first_and_capped():
+    conn = connect(":memory:")
+    for seq in range(60):
+        insert_decision(conn, DecisionRow(
+            run_id=RUN, instrument_id=6, seq=seq, ts=T0 + timedelta(minutes=seq),
+            state_before=State.FLAT, target=None, verdicts={"vet_entry": "allow"},
+            intent=None, client_order_id=None, note="skip:warmup" if seq < 48 else "hold"))
+    insert_decision(conn, DecisionRow(
+        run_id=RUN, instrument_id=7, seq=0, ts=T0 + timedelta(minutes=100),
+        state_before=State.OPEN, target=Decimal("1"), verdicts={}, intent=None,
+        client_order_id="7-x", note="flip"))
+    rows = st.recent_decisions(conn, run_id=RUN, instrument_ids=(6, 7))
+    assert len(rows) == 50
+    assert rows[0] == {
+        "ts": (T0 + timedelta(minutes=100)).isoformat(), "instrument_id": 7, "note": "flip",
+        "state_before": "OPEN", "target": "1", "verdicts": {}, "client_order_id": "7-x",
+    }
+    assert rows[1]["note"] == "hold" and rows[1]["instrument_id"] == 6
+
+
+def test_recent_alerts_newest_first():
+    conn = connect(":memory:")
+    insert_alert(conn, run_id=RUN, level="WARN", kind="margin_ratio", instrument_id=6,
+                 detail_json=json.dumps({"ratio": 0.33}), ts=T0)
+    insert_alert(conn, run_id=RUN, level="INFO", kind="stop_placed", instrument_id=6,
+                 detail_json="{}", ts=T0 + timedelta(minutes=1))
+    rows = st.recent_alerts(conn, run_id=RUN)
+    assert [r["kind"] for r in rows] == ["stop_placed", "margin_ratio"]
+    assert rows[1] == {"ts": T0.isoformat(), "level": "WARN", "kind": "margin_ratio",
+                       "instrument_id": 6, "detail": {"ratio": 0.33}}
+
+
+def test_is_clean():
+    conn = seeded_conn()
+    assert st.is_clean(conn, run_id=RUN) is True
+    insert_alert(conn, run_id=RUN, level="CRITICAL", kind="kill_switch", instrument_id=None,
+                 detail_json="{}", ts=T0)
+    assert st.is_clean(conn, run_id=RUN) is False
+
+
+def test_is_clean_false_when_halted():
+    conn = seeded_conn()
+    upsert_position_local(conn, PositionLocalRow(
+        run_id=RUN, instrument_id=6, state=State.LIQUIDATED, size=Decimal("0"),
+        entry_price=None, stop_trigger=None, stop_order_id=None,
+        cumulative_funding=Decimal("0"), updated_at=T0))
+    assert st.is_clean(conn, run_id=RUN) is False
