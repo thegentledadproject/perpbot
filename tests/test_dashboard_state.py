@@ -8,7 +8,7 @@ from decimal import Decimal
 import pytest
 
 from polyperps.dashboard import state as st
-from polyperps.exchange.types import Instrument
+from polyperps.exchange.types import Instrument, SourceType, Tick
 from polyperps.execution.sim_executor import SimExecutor
 from polyperps.execution.types import DecisionRow, OrderRow, PositionLocalRow, State
 from polyperps.storage.db import (
@@ -17,6 +17,7 @@ from polyperps.storage.db import (
     insert_alert,
     insert_decision,
     insert_recovery,
+    insert_tick,
     save_sim_account,
     upsert_order,
     upsert_position_local,
@@ -239,3 +240,62 @@ def test_is_clean_false_when_halted():
         entry_price=None, stop_trigger=None, stop_order_id=None,
         cumulative_funding=Decimal("0"), updated_at=T0))
     assert st.is_clean(conn, run_id=RUN) is False
+
+
+def tick(iid: int, ts: datetime, mark: str = "100") -> Tick:
+    return Tick(
+        instrument_id=iid, source_type=SourceType.POLYMARKET_WS, exchange_ts=ts, received_ts=ts,
+        sequence=None, mark_price=Decimal(mark), index_price=Decimal(mark), last_price=Decimal(mark),
+        funding_rate=Decimal("0.0000125"), next_funding=ts + timedelta(hours=1),
+    )
+
+
+def test_build_state_empty_run():
+    conn = connect(":memory:")
+    s = st.build_state(conn, run_id=RUN, instrument_ids=(6, 7), instruments=INSTRUMENTS,
+                       hypothesis="h1", host="box", now=T0, env={}, signal_validated=False)
+    assert s["generated_at"] == T0.isoformat()
+    assert s["run"] == {"run_id": RUN, "executor": "sim", "hypothesis": "h1", "host": "box",
+                        "started_at": None, "uptime_s": 0}
+    assert s["account"] is None and s["positions"] == []
+    assert s["guards"]["margin"] == "ok"
+    assert s["decisions"] == [] and s["alerts"] == []
+    assert s["locks"] == {"auto_mode": {"6": False, "7": False}, "live_env": False,
+                          "signal_validated": False}
+    assert s["road"]["clean"] is True
+    assert s["road"]["paper_days"] == 0.0 and s["road"]["paper_days_target"] == 14
+    assert s["road"]["native_days_required"] == 60
+    assert s["road"]["funding_periods_required"] == 1000
+    # no ticks at all: the whole 48 h window is one gap per instrument
+    assert s["feed"]["tick_gaps_48h"] == 2
+    assert s["feed"]["instruments"] == [
+        {"instrument_id": 6, "last_tick_age_s": None, "last_funding_ts": None},
+        {"instrument_id": 7, "last_tick_age_s": None, "last_funding_ts": None},
+    ]
+    json.dumps(s)   # must be serializable as-is
+
+
+def test_build_state_run_and_feed():
+    conn = seeded_conn()
+    insert_alert(conn, run_id=RUN, level="INFO", kind="stop_placed", instrument_id=6,
+                 detail_json="{}", ts=T0 - timedelta(hours=3))
+    # continuous ticks for 6 every 10 s over the last 2 min, then one 90 s hole, then more
+    t = T0 - timedelta(minutes=5)
+    while t <= T0 - timedelta(minutes=3):
+        insert_tick(conn, tick(6, t)); t += timedelta(seconds=10)
+    t = T0 - timedelta(seconds=90)
+    while t <= T0 - timedelta(seconds=2):
+        insert_tick(conn, tick(6, t)); t += timedelta(seconds=10)
+    s = st.build_state(conn, run_id=RUN, instrument_ids=(6,), instruments=INSTRUMENTS,
+                       hypothesis="h1", host="box", now=T0,
+                       env={"POLYMARKET_LIVE_TRADING": "true"}, signal_validated=True)
+    assert s["run"]["started_at"] == (T0 - timedelta(hours=3)).isoformat()
+    assert s["run"]["uptime_s"] == 3 * 3600
+    assert s["road"]["paper_days"] == pytest.approx(3 / 24)
+    assert s["locks"]["live_env"] is True and s["locks"]["signal_validated"] is True
+    feed = s["feed"]
+    assert feed["instruments"][0]["last_tick_age_s"] == pytest.approx(10.0)   # last tick at T0-10s
+    # the 48 h window starts empty (one leading gap) and has the 90 s hole: >= 2 gaps
+    assert feed["tick_gaps_48h"] >= 2
+    assert feed["funding_gaps_48h"] >= 1
+    assert feed["rejections_48h"] == 0

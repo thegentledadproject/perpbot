@@ -6,14 +6,19 @@ Every number the page shows is computed here so it can be pinned by tests.
 from __future__ import annotations
 
 import json
-from datetime import datetime
+import os
+from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import Any, Mapping, Protocol
+from typing import Any, Mapping, Protocol, Sequence
 
 from polyperps.execution.types import State
+from polyperps.gates import LIVE_ENV_VAR
 from polyperps.risk.liquidation_guard import LIMITS
 from polyperps.risk.portfolio_exposure import EXPOSURE, cluster_of
+from polyperps.signal import base as signal_base
+from polyperps.signal.sufficiency import BAR, NATIVE_SOURCES, check_dataset
 from polyperps.storage import db
+from polyperps.storage.gaps import find_gaps
 
 
 class InstrumentInfo(Protocol):
@@ -210,3 +215,105 @@ def is_clean(conn, *, run_id: str) -> bool:
     if _halted(conn, run_id):
         return False
     return not any(level == "CRITICAL" for _ts, level, _k, _i, _d in db.list_alerts(conn, run_id))
+
+
+TICK_GAP = timedelta(seconds=30)      # same defaults as scripts/gap_report.py
+FUNDING_GAP = timedelta(hours=2)
+FEED_WINDOW = timedelta(hours=48)
+PAPER_DAYS_TARGET = 14
+
+
+def _started_at(conn, run_id: str) -> datetime | None:
+    stamps: list[datetime] = []
+    for sql in (
+        "SELECT MIN(ts) FROM decisions WHERE run_id=?",
+        "SELECT MIN(submitted_at) FROM orders WHERE run_id=?",
+        "SELECT MIN(ts) FROM alerts WHERE run_id=?",
+    ):
+        (v,) = conn.execute(sql, (run_id,)).fetchone()
+        if v:
+            stamps.append(datetime.fromisoformat(v))
+    return min(stamps) if stamps else None
+
+
+def run_info(conn, *, run_id: str, hypothesis: str, host: str, now: datetime) -> dict:
+    started = _started_at(conn, run_id)
+    uptime = int((now - started).total_seconds()) if started else 0
+    return {
+        "run_id": run_id, "executor": "sim", "hypothesis": hypothesis, "host": host,
+        "started_at": _iso(started) if started else None, "uptime_s": max(0, uptime),
+    }
+
+
+def feed_health(conn, *, instrument_ids: Sequence[int], now: datetime) -> dict:
+    start = now - FEED_WINDOW
+    per: list[dict] = []
+    tick_gaps = funding_gaps = rejections = 0
+    for iid in instrument_ids:
+        (last_tick,) = conn.execute(
+            "SELECT MAX(exchange_ts) FROM ticks WHERE instrument_id=?", (iid,)).fetchone()
+        (last_funding,) = conn.execute(
+            "SELECT MAX(exchange_ts) FROM funding_rates WHERE instrument_id=?", (iid,)).fetchone()
+        age = (now - datetime.fromisoformat(last_tick)).total_seconds() if last_tick else None
+        per.append({"instrument_id": iid, "last_tick_age_s": age, "last_funding_ts": last_funding})
+        tick_gaps += len(find_gaps(conn, iid, table="ticks", max_gap=TICK_GAP, start=start, end=now))
+        funding_gaps += len(find_gaps(conn, iid, table="funding_rates", max_gap=FUNDING_GAP,
+                                      start=start, end=now))
+        (n,) = conn.execute(
+            "SELECT COUNT(*) FROM rejections WHERE instrument_id=? AND at >= ?",
+            (iid, _iso(start))).fetchone()
+        rejections += n
+    return {"instruments": per, "tick_gaps_48h": tick_gaps, "funding_gaps_48h": funding_gaps,
+            "rejections_48h": rejections}
+
+
+def road_to_live(conn, *, run_id: str, instrument_ids: Sequence[int], uptime_s: int,
+                 now: datetime) -> dict:
+    days = Decimal(0)
+    periods = 0
+    if instrument_ids:
+        for source in NATIVE_SOURCES:      # backfill may have used either native source
+            rep = check_dataset(conn, instrument_ids[0], source, now=now)
+            days = max(days, rep.days)
+            periods = max(periods, rep.funding_periods)
+    return {
+        "native_days": _f(days), "native_days_required": BAR.min_days,
+        "funding_periods": periods, "funding_periods_required": BAR.min_funding_periods,
+        "paper_days": uptime_s / 86400, "paper_days_target": PAPER_DAYS_TARGET,
+        "clean": is_clean(conn, run_id=run_id),
+    }
+
+
+def locks(*, instrument_ids: Sequence[int], env: Mapping[str, str],
+          signal_validated: bool) -> dict:
+    # Phase 2a has no per-instrument mode store; gates.py defaults every
+    # instrument to MANUAL_REVIEW, so AUTO is False for all of them.
+    return {
+        "auto_mode": {str(i): False for i in instrument_ids},
+        "live_env": env.get(LIVE_ENV_VAR) == "true",
+        "signal_validated": signal_validated,
+    }
+
+
+def build_state(
+    conn, *, run_id: str, instrument_ids: Sequence[int],
+    instruments: Mapping[int, InstrumentInfo] | None, hypothesis: str, host: str,
+    now: datetime, env: Mapping[str, str] | None = None, signal_validated: bool | None = None,
+) -> dict:
+    env = os.environ if env is None else env
+    validated = signal_base.SIGNAL_VALIDATED if signal_validated is None else signal_validated
+    run = run_info(conn, run_id=run_id, hypothesis=hypothesis, host=host, now=now)
+    account, positions = account_and_positions(conn, run_id=run_id, instruments=instruments)
+    return {
+        "generated_at": _iso(now),
+        "run": run,
+        "account": account,
+        "positions": positions,
+        "guards": guards(conn, run_id=run_id, account=account, positions=positions),
+        "feed": feed_health(conn, instrument_ids=instrument_ids, now=now),
+        "decisions": recent_decisions(conn, run_id=run_id, instrument_ids=instrument_ids),
+        "alerts": recent_alerts(conn, run_id=run_id),
+        "locks": locks(instrument_ids=instrument_ids, env=env, signal_validated=validated),
+        "road": road_to_live(conn, run_id=run_id, instrument_ids=instrument_ids,
+                             uptime_s=run["uptime_s"], now=now),
+    }
