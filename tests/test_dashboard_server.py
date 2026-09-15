@@ -102,3 +102,11 @@ def test_connection_is_read_only(db_path: Path):
     with pytest.raises(sqlite3.OperationalError):
         conn.execute("INSERT INTO recovery VALUES ('x', 'y', '{}')")
     conn.close()
+
+
+def test_index_has_the_panels(server):
+    _, _, body = get(server, "/")
+    text = body.decode()
+    for marker in ("id=\"positions\"", "id=\"trail\"", "id=\"guards\"", "id=\"feed\"",
+                   "id=\"locks\"", "id=\"road\"", "id=\"stale\"", "setInterval"):
+        assert marker in text

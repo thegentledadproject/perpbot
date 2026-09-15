@@ -1,10 +1,238 @@
 <!doctype html>
-<html><head><meta charset="utf-8"><title>polyperps</title></head>
-<body><pre id="out">loading /api/state ...</pre>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>polyperps · paper soak</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap">
+<style>
+  :root { --bg:#141516; --panel:#1a1c1f; --line:#2a2d31; --line2:#202327; --ink:#d4d7db; --ink2:#b6bbc2;
+          --mute:#8a9098; --dim:#6c737b; --hi:#f2f3f4; --accent:#4fb3a9; --track:#24403d;
+          --good:#0ca30c; --warn:#fab219; --serious:#ec835a; --crit:#d03b3b; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:12px/1.45 'JetBrains Mono', ui-monospace, Consolas, Menlo, monospace; }
+  a { color:#7fcfc6; } a:hover { color:#a8e3dc; }
+  button { font:inherit; cursor:pointer; color:inherit; background:transparent; border:0; }
+  .page { min-height:100vh; padding:24px; display:flex; flex-direction:column; gap:16px; }
+  .hdr { display:flex; align-items:center; gap:28px; padding-bottom:14px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  .brand { font-size:16px; font-weight:600; color:var(--hi); letter-spacing:.02em; }
+  .sub { color:var(--mute); font-size:11px; }
+  .chips { display:flex; gap:8px; flex-wrap:wrap; }
+  .chip { border:1px solid var(--line); padding:5px 10px; border-radius:3px; color:var(--ink2); }
+  .chip b { color:var(--hi); font-weight:500; }
+  .right { margin-left:auto; display:flex; align-items:center; gap:20px; }
+  .seg { display:flex; gap:2px; background:#1d1f22; border:1px solid var(--line); border-radius:4px; padding:2px; }
+  .seg button { border-radius:3px; padding:6px 12px; min-height:28px; color:var(--mute); }
+  .seg button.on { background:#2e3236; color:var(--hi); }
+  .lamp { width:8px; height:8px; border-radius:50%; display:inline-block; flex-shrink:0; }
+  .tiles { display:grid; grid-template-columns:repeat(6, minmax(0,1fr)); gap:12px; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:4px; padding:14px 16px; display:flex; flex-direction:column; gap:8px; min-height:0; }
+  .tile .k { color:var(--mute); font-size:11px; }
+  .tile .v { font-size:28px; font-weight:500; color:var(--hi); line-height:1.1; }
+  .tile .n { color:var(--ink2); }
+  .meter { height:4px; border-radius:2px; background:var(--track); position:relative; }
+  .meter > i { display:block; height:100%; border-radius:2px; background:var(--accent); }
+  .meter.m6 { height:6px; background:var(--line); }
+  .meter .floor { position:absolute; top:-3px; width:2px; height:12px; background:var(--hi); }
+  .main { display:grid; grid-template-columns:5fr 4fr 3fr; gap:12px; flex-grow:1; }
+  .h { color:var(--mute); font-size:11px; text-transform:uppercase; letter-spacing:.08em; }
+  .hint { color:var(--dim); font-size:11px; }
+  .row { display:grid; grid-template-columns:1.4fr 1fr 1.2fr 1.2fr 1fr 1fr 1fr; gap:8px; padding:8px 6px; margin:0 -6px; border-radius:3px; font-variant-numeric:tabular-nums; }
+  .row.head { color:var(--mute); font-size:11px; border-bottom:1px solid var(--line); padding-bottom:6px; border-radius:0; }
+  .row.body { cursor:pointer; } .row.body:hover { background:#1f2226; } .row.body.on { background:#24282c; }
+  .tabs { display:flex; gap:16px; border-bottom:1px solid var(--line); }
+  .tabs button { padding:0 0 8px; min-height:28px; color:var(--mute); border-bottom:2px solid transparent; font-size:11px; text-transform:uppercase; letter-spacing:.08em; }
+  .tabs button.on { color:var(--hi); border-bottom-color:var(--accent); }
+  .ev { display:grid; grid-template-columns:52px 56px 1fr; gap:10px; padding:5px 0; border-bottom:1px solid var(--line2); font-variant-numeric:tabular-nums; }
+  .kv { display:flex; justify-content:space-between; align-items:center; font-variant-numeric:tabular-nums; }
+  .kv span:first-child { color:var(--ink2); display:flex; align-items:center; gap:8px; }
+  .kv span:last-child { color:var(--hi); }
+  .foot { display:grid; grid-template-columns:3fr 4fr; gap:12px; border-top:1px solid var(--line); padding-top:16px; }
+  .col { display:flex; flex-direction:column; gap:9px; }
+  #stale { display:none; background:#3a2323; color:#f2c8c8; border:1px solid var(--crit); padding:8px 12px; border-radius:3px; }
+  #stale.on { display:block; }
+  .good { color:var(--good) } .warn { color:var(--warn) } .serious { color:var(--serious) } .crit { color:var(--crit) } .mute { color:var(--mute) }
+  @media (max-width: 1100px) { .tiles { grid-template-columns:repeat(3, minmax(0,1fr)); } .main, .foot { grid-template-columns:1fr; } }
+</style>
+</head>
+<body>
+<div class="page">
+  <div id="stale"></div>
+
+  <div class="hdr">
+    <div><div class="brand">polyperps</div><div class="sub" id="subtitle">paper soak</div></div>
+    <div class="chips" id="chips"></div>
+    <div class="right">
+      <div class="seg" id="instseg"></div>
+      <div class="kv" id="feedlamp"><span><i class="lamp" style="background:var(--mute)"></i>feed —</span></div>
+    </div>
+  </div>
+
+  <div class="tiles" id="tiles"></div>
+
+  <div class="main">
+    <div class="panel">
+      <div class="kv"><span class="h">Positions</span><span class="hint">click a row for its guards</span></div>
+      <div class="row head"><div>inst</div><div>side</div><div>entry</div><div>mark</div><div>pnl</div><div>liq dist</div><div>funding</div></div>
+      <div id="positions"></div>
+      <div id="detail"></div>
+    </div>
+    <div class="panel">
+      <div class="tabs" id="tabs"></div>
+      <div id="trail"></div>
+      <div class="hint" id="trailfoot" style="margin-top:auto"></div>
+    </div>
+    <div class="col">
+      <div class="panel"><div class="h">Guards</div><div id="guards" class="col"></div>
+        <div class="hint">WARN is expected at 3x: the 35 % line is crossed at entry.</div></div>
+      <div class="panel" style="flex-grow:1"><div class="h">Feed health · 48 h</div><div id="feed" class="col"></div></div>
+    </div>
+  </div>
+
+  <div class="foot">
+    <div class="col"><div class="h" id="lockshead">Live locks</div><div id="locks" class="col"></div>
+      <div class="hint">All three must open for any live order. None can be opened from this page.</div></div>
+    <div class="col"><div class="h">Road to live</div><div id="road" class="col"></div>
+      <div class="hint">re-check monthly with scripts/sufficiency.py</div></div>
+  </div>
+</div>
+
 <script>
-async function tick() {
-  const r = await fetch('/api/state', {cache: 'no-store'});
-  document.getElementById('out').textContent = JSON.stringify(await r.json(), null, 2);
-}
-tick(); setInterval(tick, 10000);
-</script></body></html>
+(function () {
+  'use strict';
+  var S = null, inst = 'all', tab = 'decisions', selected = null, lastOk = null;
+  var GOOD = 'var(--good)', WARN = 'var(--warn)', SERIOUS = 'var(--serious)', CRIT = 'var(--crit)', MUTE = 'var(--mute)';
+
+  function esc(x) { return String(x).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+  function pct(x, d) { return x == null ? '—' : (100 * x).toFixed(d == null ? 1 : d) + ' %'; }
+  function num(s) { if (s == null) return '—'; var n = Number(s); return isNaN(n) ? esc(s) : n.toLocaleString('en-US', { maximumFractionDigits: 2 }); }
+  function signed(s) { if (s == null) return '—'; var n = Number(s); return (n > 0 ? '+' : '') + num(s); }
+  function hhmm(iso) { return iso ? iso.slice(11, 16) + 'Z' : '—'; }
+  function dur(sec) { var d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600); return d + ' d ' + h + ' h'; }
+  function lamp(color) { return '<i class="lamp" style="background:' + color + '"></i>'; }
+  function levelColor(l) { return l === 'CRITICAL' ? CRIT : l === 'WARN' ? WARN : l === 'ok' || l === 'INFO' ? GOOD : MUTE; }
+  function name(id) { var p = (S.positions || []).filter(function (x) { return x.instrument_id === id; })[0]; return p ? p.name : 'inst ' + id; }
+  function ids() { return (S.feed.instruments || []).map(function (f) { return f.instrument_id; }); }
+  function meter(p, floorPct, cls) { return '<div class="meter ' + (cls || '') + '"><i style="width:' + Math.max(0, Math.min(100, p)) + '%"></i>' + (floorPct == null ? '' : '<span class="floor" style="left:' + floorPct + '%"></span>') + '</div>'; }
+
+  function render() {
+    if (!S) return;
+    var r = S.run, a = S.account, g = S.guards, f = S.feed, L = S.locks, rd = S.road;
+    document.getElementById('subtitle').textContent = 'paper soak · day ' + Math.floor(rd.paper_days) + ' of ' + rd.paper_days_target + (rd.clean ? ' · clean' : ' · NOT clean');
+    document.getElementById('chips').innerHTML =
+      '<div class="chip">run <b>' + esc(r.run_id) + '</b></div><div class="chip">executor <b>SIM</b></div>' +
+      '<div class="chip">hypothesis <b>' + esc(r.hypothesis) + '</b></div><div class="chip">box <b>' + esc(r.host) + '</b></div>' +
+      '<div class="chip">up <b>' + (r.started_at ? dur(r.uptime_s) : '—') + '</b></div>';
+
+    var seg = [{ k: 'all', l: 'All' }].concat(ids().map(function (id) { return { k: id, l: id + ' ' + name(id) }; }));
+    document.getElementById('instseg').innerHTML = seg.map(function (t) { return '<button data-k="' + t.k + '" class="' + (String(t.k) === String(inst) ? 'on' : '') + '">' + esc(t.l) + '</button>'; }).join('');
+
+    var ages = f.instruments.map(function (x) { return x.last_tick_age_s; }).filter(function (x) { return x != null; });
+    var age = ages.length ? Math.max.apply(null, ages) : null;
+    var feedColor = age == null ? MUTE : age < 30 ? GOOD : age < 300 ? WARN : CRIT;
+    document.getElementById('feedlamp').innerHTML = '<span>' + lamp(feedColor) + 'feed ' + (age == null ? 'no ticks' : 'live · last tick ' + Math.round(age) + ' s') + '</span>';
+
+    function tile(k, v, n) { return '<div class="panel tile"><div class="k">' + k + '</div><div class="v">' + v + '</div><div class="n">' + n + '</div></div>'; }
+    document.getElementById('tiles').innerHTML = a ? [
+      tile('Paper equity', num(a.equity), '<span class="' + (Number(a.pnl_since_start) >= 0 ? 'good' : 'serious') + '">' + signed(a.pnl_since_start) + '</span> since start'),
+      tile('Unrealized', signed(a.unrealized), S.positions.length + ' open position' + (S.positions.length === 1 ? '' : 's')),
+      tile('Gross exposure', a.gross_exposure.toFixed(2) + 'x', meter(100 * a.gross_exposure / a.gross_limit) + '<div>limit ' + a.gross_limit.toFixed(1) + 'x</div>'),
+      tile('Cluster net', a.cluster_net == null ? 'n/a' : a.cluster_net.toFixed(2) + 'x', (a.cluster_net == null ? '' : meter(100 * a.cluster_net / a.cluster_limit)) + '<div>limit ' + a.cluster_limit.toFixed(1) + 'x</div>'),
+      tile('Leverage', a.leverage + 'x', 'pre-registered, fixed'),
+      tile('Kill switch', '<span class="mute">' + esc(a.kill_switch) + '</span>', 'thresholds None until 2b')
+    ].join('') : [tile('Paper equity', '—', 'warming up'), tile('Unrealized', '—', ''), tile('Gross exposure', '—', ''), tile('Cluster net', '—', ''), tile('Leverage', '3x', 'pre-registered, fixed'), tile('Kill switch', '<span class="mute">unarmed</span>', 'thresholds None until 2b')].join('');
+
+    var pos = S.positions.filter(function (p) { return inst === 'all' || String(p.instrument_id) === String(inst); });
+    document.getElementById('positions').innerHTML = pos.length ? pos.map(function (p) {
+      return '<div class="row body ' + (selected === p.instrument_id ? 'on' : '') + '" data-id="' + p.instrument_id + '">' +
+        '<div style="color:var(--hi)">' + p.instrument_id + ' ' + esc(p.name) + '</div>' +
+        '<div style="display:flex;align-items:center;gap:6px">' + lamp(p.side === 'LONG' ? GOOD : SERIOUS) + p.side + '</div>' +
+        '<div>' + num(p.entry_price) + '</div><div>' + num(p.mark) + '</div>' +
+        '<div class="' + (Number(p.pnl) >= 0 ? 'good' : 'serious') + '">' + signed(p.pnl) + '</div>' +
+        '<div>' + pct(p.liq_distance, 0) + '</div><div>' + pct(p.funding_paid) + '</div></div>';
+    }).join('') : '<div class="hint" style="padding:8px 0">no open positions</div>';
+
+    var sel = pos.filter(function (p) { return p.instrument_id === selected; })[0];
+    if (sel) {
+      var adv = sel.adverse_move;
+      function m(label, value, p, floor, fill, note) { return '<div class="col" style="gap:5px"><div class="kv"><span>' + label + '</span><span>' + value + '</span></div>' + meter(p, floor, 'm6').replace('<i style', '<i style="background:' + fill + ';" data-x') + '<div class="hint">' + note + '</div></div>'; }
+      document.getElementById('detail').innerHTML = '<div class="col" style="margin-top:6px;border-top:1px solid var(--line);padding-top:12px;gap:12px">' +
+        '<div class="kv"><span style="color:var(--hi)">' + sel.instrument_id + ' ' + esc(sel.name) + ' ' + sel.side + ' · guard distances</span><span class="hint">' + (sel.opened_at ? 'opened ' + esc(sel.opened_at.slice(0, 16)) + 'Z' : '') + '</span></div>' +
+        m('liquidation distance', pct(sel.liq_distance, 0), 100 * sel.liq_distance, 25, sel.liq_distance > 0.30 ? 'var(--accent)' : sel.liq_distance > 0.25 ? WARN : CRIT, 'exit when it falls to the 25 % floor (marker)') +
+        m('adverse move', pct(adv), 100 * adv / 0.15, 100 * 8 / 15, adv < 0.05 ? 'var(--accent)' : adv < 0.08 ? WARN : CRIT, 'check_open flattens near 8 % (marker); exchange stop at 15 %') +
+        m('funding cost paid', pct(sel.funding_paid), 100 * sel.funding_paid / 0.02, 100, sel.funding_paid < 0.015 ? 'var(--accent)' : WARN, 'funding-cost exit at 2 % (marker)') + '</div>';
+    } else {
+      document.getElementById('detail').innerHTML = '<div class="hint" style="margin-top:auto">exit rules: liquidation-distance floor 25 % · exchange-side stop 15 % · funding-cost exit 2 % · check_open flattens near 8 % adverse</div>';
+    }
+
+    document.getElementById('tabs').innerHTML = ['decisions', 'alerts'].map(function (t) { return '<button data-t="' + t + '" class="' + (t === tab ? 'on' : '') + '">' + t + '</button>'; }).join('');
+    var evs = (tab === 'decisions' ? S.decisions : S.alerts).filter(function (e) { return inst === 'all' || e.instrument_id == null || String(e.instrument_id) === String(inst); }).slice(0, 12);
+    document.getElementById('trail').innerHTML = evs.length ? evs.map(function (e) {
+      var head, note, color;
+      if (tab === 'decisions') {
+        head = e.note; color = /^enter|strategy|flip/.test(e.note) ? GOOD : /liq|funding|kill|reject|halt/.test(e.note) ? SERIOUS : MUTE;
+        note = Object.keys(e.verdicts || {}).map(function (k) { return k + ' ' + e.verdicts[k]; }).join(' · ') + (e.client_order_id ? ' · ' + esc(e.client_order_id) : '');
+      } else {
+        head = e.level + ' ' + e.kind; color = levelColor(e.level);
+        note = Object.keys(e.detail || {}).slice(0, 4).map(function (k) { return k + ' ' + esc(JSON.stringify(e.detail[k])); }).join(' · ');
+      }
+      return '<div class="ev"><div class="mute">' + hhmm(e.ts) + '</div><div style="color:var(--ink2)">' + (e.instrument_id == null ? '—' : e.instrument_id) + '</div>' +
+        '<div><div style="display:flex;align-items:center;gap:6px">' + lamp(color) + '<span style="color:var(--hi)">' + esc(head) + '</span></div><div class="hint">' + note + '</div></div></div>';
+    }).join('') : '<div class="hint" style="padding:8px 0">nothing yet</div>';
+    document.getElementById('trailfoot').textContent = tab === 'decisions' ? 'newest first · one row per router tick' : 'level changes only · CRITICAL also goes to Telegram when configured';
+
+    document.getElementById('guards').innerHTML = [
+      ['margin level', g.margin, levelColor(g.margin)],
+      ['liquidation guard', g.liquidation, g.liquidation === 'ok' ? GOOD : CRIT],
+      ['exposure limits', g.exposure, g.exposure === 'ok' ? GOOD : CRIT],
+      ['halted instruments', g.halted.length ? g.halted.join(', ') : 'none', g.halted.length ? CRIT : GOOD],
+      ['reconciliation', g.reconciliation ? (g.reconciliation.findings ? g.reconciliation.findings + ' findings' : 'in sync') : 'no run yet', g.reconciliation && g.reconciliation.findings ? WARN : GOOD]
+    ].map(function (x) { return '<div class="kv"><span>' + lamp(x[2]) + x[0] + '</span><span style="color:' + x[2] + '">' + esc(x[1]) + '</span></div>'; }).join('');
+
+    var lastFunding = f.instruments.map(function (x) { return x.last_funding_ts; }).filter(Boolean).sort().pop();
+    document.getElementById('feed').innerHTML = [
+      ['tick gaps', f.tick_gaps_48h], ['funding gaps', f.funding_gaps_48h], ['rejections', f.rejections_48h], ['last funding row', hhmm(lastFunding)]
+    ].concat(f.instruments.map(function (x) { return ['last tick · ' + x.instrument_id, x.last_tick_age_s == null ? 'none' : Math.round(x.last_tick_age_s) + ' s']; }))
+     .map(function (x) { return '<div class="kv"><span>' + x[0] + '</span><span>' + x[1] + '</span></div>'; }).join('');
+
+    var autoOn = Object.keys(L.auto_mode).filter(function (k) { return L.auto_mode[k]; });
+    var closed = (autoOn.length ? 0 : 1) + (L.live_env ? 0 : 1) + (L.signal_validated ? 0 : 1);
+    document.getElementById('lockshead').textContent = 'Live locks · ' + closed + ' of 3 closed';
+    document.getElementById('locks').innerHTML = [
+      ['ExecutionMode.AUTO', Object.keys(L.auto_mode).map(function (k) { return k + ' ' + (L.auto_mode[k] ? 'ON' : 'off'); }).join(' · '), autoOn.length],
+      ['POLYMARKET_LIVE_TRADING', L.live_env ? 'true' : 'unset', L.live_env],
+      ['SIGNAL_VALIDATED', L.signal_validated ? 'True' : 'False', L.signal_validated]
+    ].map(function (x) { return '<div style="display:flex;align-items:center;gap:8px">' + lamp(x[2] ? WARN : CRIT) + '<span style="color:var(--hi)">' + x[0] + '</span><span class="mute">' + esc(x[1]) + '</span></div>'; }).join('');
+
+    document.getElementById('road').innerHTML = [
+      ['native funding history', rd.native_days.toFixed(0) + ' / ' + rd.native_days_required + ' days', rd.native_days / rd.native_days_required],
+      ['funding periods stored', rd.funding_periods + ' / ' + rd.funding_periods_required, rd.funding_periods / rd.funding_periods_required],
+      ['clean paper days', rd.paper_days.toFixed(1) + ' / ' + rd.paper_days_target + (rd.clean ? '' : ' · NOT clean'), rd.paper_days / rd.paper_days_target]
+    ].map(function (x) { return '<div class="col" style="gap:4px"><div class="kv"><span>' + x[0] + '</span><span>' + x[1] + '</span></div>' + meter(100 * x[2]) + '</div>'; }).join('');
+  }
+
+  document.addEventListener('click', function (ev) {
+    var b = ev.target.closest('#instseg button'); if (b) { inst = b.dataset.k; render(); return; }
+    var t = ev.target.closest('#tabs button'); if (t) { tab = t.dataset.t; render(); return; }
+    var r = ev.target.closest('.row.body'); if (r) { var id = Number(r.dataset.id); selected = selected === id ? null : id; render(); }
+  });
+
+  function stale(on) {
+    var el = document.getElementById('stale');
+    el.className = on ? 'on' : '';
+    el.textContent = on ? 'stale since ' + (lastOk ? hhmm(lastOk) : 'start') + ' — /api/state is not answering; showing the last numbers' : '';
+  }
+
+  function poll() {
+    fetch('/api/state', { cache: 'no-store' }).then(function (r) {
+      if (!r.ok) throw new Error(String(r.status));
+      return r.json();
+    }).then(function (s) { S = s; lastOk = s.generated_at; stale(false); render(); })
+      .catch(function () { stale(true); });
+  }
+  poll();
+  setInterval(poll, 10000);
+})();
+</script>
+</body>
+</html>
