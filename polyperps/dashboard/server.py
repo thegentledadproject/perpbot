@@ -78,6 +78,8 @@ class DashboardServer:
 
         class Handler(BaseHTTPRequestHandler):
             server_version = "polyperps-dashboard"
+            # Bound how long a slow/stalled client can pin a request-handling thread.
+            timeout = 10
 
             def log_message(self, fmt, *args):   # route stdlib access log to logging
                 log.debug("%s " + fmt, self.address_string(), *args)
@@ -102,15 +104,19 @@ class DashboardServer:
                 elif path == "/api/state":
                     try:
                         payload = server.state()
+                        body = json.dumps(payload).encode()
                     except sqlite3.OperationalError as e:
                         log.warning("dashboard: db unavailable: %s", e)
                         self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "db_unavailable"}, head=head)
                         return
                     except Exception:
+                        # Covers both build_state failures and json.dumps encoding failures
+                        # (stray Decimal/NaN/enum in the payload) so neither leaks a raw
+                        # traceback to socketserver's handle_error.
                         log.exception("dashboard: state failed")
                         self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "internal"}, head=head)
                         return
-                    self._json(HTTPStatus.OK, payload, head=head)
+                    self._send(HTTPStatus.OK, body, "application/json; charset=utf-8", head=head)
                 else:
                     self._json(HTTPStatus.NOT_FOUND, {"error": "not_found"}, head=head)
 
@@ -124,9 +130,11 @@ class DashboardServer:
                 # Drain any request body the client is still sending before responding.
                 # Closing the socket first can race a client write and trigger a Windows
                 # WinError 10053 (connection aborted) instead of a clean read of the 405.
+                # Cap the drain: a huge/stalled body must not pin this thread, since this
+                # server can be reachable on port 80.
                 length = int(self.headers.get("Content-Length", 0) or 0)
                 if length:
-                    self.rfile.read(length)
+                    self.rfile.read(min(length, 65536))
                 self._json(HTTPStatus.METHOD_NOT_ALLOWED, {"error": "method_not_allowed"})
 
             do_POST = do_PUT = do_DELETE = do_PATCH = _reject

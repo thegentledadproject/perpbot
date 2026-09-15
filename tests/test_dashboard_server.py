@@ -7,6 +7,7 @@ import threading
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -79,6 +80,21 @@ def test_missing_db_is_503(server, db_path: Path):
     db_path.unlink()
     status, _, body = get(server, "/api/state")
     assert status == 503 and json.loads(body) == {"error": "db_unavailable"}
+
+
+def test_unserializable_state_is_500_and_recovers(server, monkeypatch):
+    # A stray Decimal (or NaN/enum) escaping json.dumps must not leak a raw traceback to
+    # the client -- it should be caught and mapped to the same 500 as any other state failure,
+    # and the failure must not wedge the server for the next request.
+    monkeypatch.setattr(server, "state", lambda: {"x": Decimal("1")})
+    status, _, body = get(server, "/api/state")
+    assert status == 500 and json.loads(body) == {"error": "internal"}
+
+    monkeypatch.undo()
+    status, _, body = get(server, "/api/state")
+    assert status == 200
+    assert set(json.loads(body)) == {"generated_at", "run", "account", "positions", "guards",
+                                      "feed", "decisions", "alerts", "locks", "road"}
 
 
 def test_connection_is_read_only(db_path: Path):
