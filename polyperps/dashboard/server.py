@@ -78,6 +78,7 @@ class DashboardServer:
 
         class Handler(BaseHTTPRequestHandler):
             server_version = "polyperps-dashboard"
+            sys_version = ""    # don't leak the Python version in the Server header
             # Bound how long a slow/stalled client can pin a request-handling thread.
             timeout = 10
 
@@ -132,7 +133,10 @@ class DashboardServer:
                 # WinError 10053 (connection aborted) instead of a clean read of the 405.
                 # Cap the drain: a huge/stalled body must not pin this thread, since this
                 # server can be reachable on port 80.
-                length = int(self.headers.get("Content-Length", 0) or 0)
+                try:
+                    length = int(self.headers.get("Content-Length", 0) or 0)
+                except ValueError:
+                    length = 0
                 if length:
                     self.rfile.read(min(length, 65536))
                 self._json(HTTPStatus.METHOD_NOT_ALLOWED, {"error": "method_not_allowed"})

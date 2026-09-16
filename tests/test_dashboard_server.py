@@ -1,6 +1,7 @@
 """Routes, read-only DB access, and error mapping of the dashboard server."""
 from __future__ import annotations
 
+import http.client
 import json
 import sqlite3
 import threading
@@ -62,6 +63,7 @@ def test_state_is_json_with_top_level_keys(server):
     assert set(s) == {"generated_at", "run", "account", "positions", "guards", "feed",
                       "decisions", "alerts", "locks", "road"}
     assert s["run"]["host"] == "testbox" and s["generated_at"] == T0.isoformat()
+    assert "Python" not in headers["Server"]
 
 
 def test_unknown_path_is_404_json(server):
@@ -74,6 +76,21 @@ def test_post_is_405(server):
     with pytest.raises(urllib.error.HTTPError) as ei:
         urllib.request.urlopen(req, timeout=5)
     assert ei.value.code == 405
+
+
+def test_post_with_non_numeric_content_length_is_405(server):
+    # urllib recomputes Content-Length from the body, so a malformed header needs
+    # http.client directly to reproduce the int(...) crash this guards against.
+    conn = http.client.HTTPConnection("127.0.0.1", server.port, timeout=5)
+    try:
+        conn.putrequest("POST", "/api/state", skip_host=True)
+        conn.putheader("Content-Length", "abc")
+        conn.endheaders()
+        resp = conn.getresponse()
+        assert resp.status == 405
+        resp.read()
+    finally:
+        conn.close()
 
 
 def test_missing_db_is_503(server, db_path: Path):

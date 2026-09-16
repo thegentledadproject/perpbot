@@ -155,11 +155,15 @@
     var sel = pos.filter(function (p) { return p.instrument_id === selected; })[0];
     if (sel) {
       var adv = sel.adverse_move;
+      // check_open flattens when liq distance = |mark - liq| / mark hits 0.25. Long liq = 0.6867 * entry,
+      // so mark = entry * (1 - x) hits that floor at x ~= 8.4 % adverse; short liq = 1.3133 * entry, mark =
+      // entry * (1 + x) hits it at x ~= 5.1 % adverse.
+      var flattenPct = sel.side === 'LONG' ? 8.4 : 5.1;
       function m(label, value, p, floor, fill, note) { return '<div class="col" style="gap:5px"><div class="kv"><span>' + label + '</span><span>' + value + '</span></div>' + meter(p, floor, 'm6', fill) + '<div class="hint">' + note + '</div></div>'; }
       document.getElementById('detail').innerHTML = '<div class="col" style="margin-top:6px;border-top:1px solid var(--line);padding-top:12px;gap:12px">' +
         '<div class="kv"><span style="color:var(--hi)">' + sel.instrument_id + ' ' + esc(sel.name) + ' ' + sel.side + ' · guard distances</span><span class="hint">' + (sel.opened_at ? 'opened ' + esc(sel.opened_at.slice(0, 16)) + 'Z' : '') + '</span></div>' +
         m('liquidation distance', pct(sel.liq_distance, 0), 100 * sel.liq_distance, 25, sel.liq_distance > 0.30 ? 'var(--accent)' : sel.liq_distance > 0.25 ? WARN : CRIT, 'exit when it falls to the 25 % floor (marker)') +
-        m('adverse move', pct(adv), 100 * adv / 0.15, 100 * 8 / 15, adv < 0.05 ? 'var(--accent)' : adv < 0.08 ? WARN : CRIT, 'check_open flattens near 8 % (marker); exchange stop at 15 %') +
+        m('adverse move', pct(adv), 100 * adv / 0.15, 100 * flattenPct / 15, adv < 0.05 ? 'var(--accent)' : adv < 0.08 ? WARN : CRIT, 'check_open flattens near ' + flattenPct + ' % (marker); exchange stop at 15 %') +
         m('funding cost paid', pct(sel.funding_paid), 100 * sel.funding_paid / 0.02, 100, sel.funding_paid < 0.015 ? 'var(--accent)' : WARN, 'funding-cost exit at 2 % (marker)') + '</div>';
     } else {
       document.getElementById('detail').innerHTML = '<div class="hint" style="margin-top:auto">exit rules: liquidation-distance floor 25 % · exchange-side stop 15 % · funding-cost exit 2 % · check_open flattens near 8 % adverse</div>';
