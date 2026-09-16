@@ -70,11 +70,11 @@ All reads go through existing `polyperps/storage/db.py` helpers (`load_sim_accou
     "entry_price": "…", "mark": "…", "pnl": "…",
     "liq_price": "…", "liq_distance": 0.41,          // |mark - liq_price| / mark
     "adverse_move": 0.006,                            // max(0, unfavourable move since entry / entry)
-    "funding_paid": 0.003,                            // cumulative_funding / (size * entry)
+    "funding_paid": 0.003,                            // -cumulative_funding / (|size| * entry); cumulative_funding is negative when paid
     "stop_trigger": "…", "opened_at": "…"             // opened_at = submitted_at of the fill that opened it
   }],
   "guards": {
-    "margin": "WARN",                 // level of the latest alerts row with kind=margin_ratio, else "ok"
+    "margin": "WARN",                 // worst level margin_alert() assigns across open positions' liq_distance, else "ok"
     "liquidation": "ok" | "breach",   // breach if any liq_distance < LIMITS.min_liq_distance
     "exposure": "ok" | "breach",      // from vet_exposure on current positions
     "halted": [7],                    // instruments with positions_local.state in {HALTED, LIQUIDATED}
@@ -105,7 +105,7 @@ Rules that matter:
 
 - Unrealized and equity use the sim formula: `equity = cash + Σ size × (mark − entry)`, marks from `sim_account.json["marks"]`.
 - `liq_distance`, `adverse_move`, `funding_paid` are computed per position from `sim_account.json` + `positions_local`; they are not stored anywhere, so the tests pin them against hand-computed values.
-- "Latest alert level = current level" holds because margin/pnl alerts fire on transitions only (`alerts.py`). The page labels the guard with the level text, never colour alone.
+- Margin level is recomputed from the open positions' liquidation distance with the same thresholds the router uses; alerts fire only on entering WARN/CRITICAL, so the alert trail is history, not state. The page labels the guard with the level text, never colour alone.
 - The road-to-live thresholds (60 days, 1,000 periods) are read from `signal/sufficiency.BAR`, not retyped.
 - `build_state` takes `now` and the instrument list as arguments so it is deterministic under test.
 

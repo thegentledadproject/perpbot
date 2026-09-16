@@ -7,12 +7,13 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Mapping, Protocol, Sequence
 
 from polyperps.execution.types import State
 from polyperps.gates import LIVE_ENV_VAR
+from polyperps.monitor.alerts import margin_alert
 from polyperps.risk.liquidation_guard import LIMITS
 from polyperps.risk.portfolio_exposure import EXPOSURE, cluster_of
 from polyperps.signal import base as signal_base
@@ -101,7 +102,10 @@ def account_and_positions(
         move = (mark - entry) / entry if entry else _ZERO
         adverse = max(_ZERO, -move if size > 0 else move)
         base = abs(size) * entry
-        funding_paid = funding / base if base else _ZERO
+        # cumulative_funding is negative when funding was PAID (execution/types.py
+        # PositionView docstring; sim_executor.apply_funding accumulates -size*mark*rate),
+        # so negate it here: paid funding must show as a positive cost.
+        funding_paid = -funding / base if base else _ZERO
         inst = instruments.get(iid) if instruments else None
         if inst is None:
             all_known = False
@@ -154,12 +158,22 @@ def _halted(conn, run_id: str) -> list[int]:
     return sorted(iid for iid, row in local.items() if row.state in _HALT_STATES)
 
 
+_MARGIN_RANK = {"WARN": 1, "CRITICAL": 2}
+
+
 def guards(conn, *, run_id: str, account: dict | None, positions: list[dict]) -> dict:
+    # order_router.py's margin_ratio alert only fires when the level BECOMES WARN/CRITICAL
+    # (nothing is emitted on recovery or close), so "latest alert row = current level" is
+    # false. Recompute the level straight from the open positions' liquidation distance with
+    # the same thresholds the router uses, and take the worst across positions.
     margin = "ok"
-    for ts, level, kind, _iid, _detail in reversed(db.list_alerts(conn, run_id)):
-        if kind == "margin_ratio":
-            margin = level
-            break
+    best_rank = 0
+    now = datetime.now(timezone.utc)
+    for p in positions:
+        alert = margin_alert(Decimal(str(p["liq_distance"])), p["instrument_id"], now)
+        if alert is not None and _MARGIN_RANK[alert.level] > best_rank:
+            best_rank = _MARGIN_RANK[alert.level]
+            margin = alert.level
     liquidation = "ok"
     if any(p["liq_distance"] < _f(LIMITS.min_liq_distance) for p in positions):
         liquidation = "breach"

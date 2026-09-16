@@ -31,8 +31,10 @@ BLOB = {
     "start_equity": "10000",
     "n": 2,
     "positions": {
-        "6": {"size": "0.001", "entry": "100000", "funding": "0.3"},
-        "7": {"size": "-0.1", "entry": "4000", "funding": "0.5"},
+        # negative funding = PAID (execution/types.py PositionView docstring); the dashboard
+        # shows paid funding as a positive cost, so these pin "0.3/100" and "0.5/400" below.
+        "6": {"size": "0.001", "entry": "100000", "funding": "-0.3"},
+        "7": {"size": "-0.1", "entry": "4000", "funding": "-0.5"},
     },
     "stops": {"6": "85000", "7": "4600"},
     "marks": {"6": "101000", "7": "4040"},
@@ -151,23 +153,47 @@ def test_guards_ok_when_quiet():
     conn = seeded_conn()
     account, positions = st.account_and_positions(conn, run_id=RUN, instruments=INSTRUMENTS)
     g = st.guards(conn, run_id=RUN, account=account, positions=positions)
+    # Both seeded positions sit with liq_distance ~0.30-0.32 at the fixture's 3x leverage,
+    # inside the WARN band (< 0.35) but not CRITICAL (>= 0.28) -- WARN is expected at 3x,
+    # the 35 % line is crossed at entry (see index.html's guards hint).
     assert g == {
-        "margin": "ok", "liquidation": "ok", "exposure": "ok",
+        "margin": "WARN", "liquidation": "ok", "exposure": "ok",
         "halted": [], "reconciliation": None,
     }
 
 
-def test_guards_margin_follows_latest_alert():
+def test_guards_margin_ok_when_distances_safe():
     conn = seeded_conn()
-    insert_alert(conn, run_id=RUN, level="WARN", kind="margin_ratio", instrument_id=6,
-                 detail_json="{}", ts=T0 - timedelta(minutes=5))
-    insert_alert(conn, run_id=RUN, level="INFO", kind="margin_ratio", instrument_id=6,
-                 detail_json="{}", ts=T0 - timedelta(minutes=1))
-    insert_alert(conn, run_id=RUN, level="CRITICAL", kind="pnl_drawdown", instrument_id=None,
-                 detail_json="{}", ts=T0)
     account, positions = st.account_and_positions(conn, run_id=RUN, instruments=INSTRUMENTS)
+    positions[0]["liq_distance"] = 0.41
+    positions[1]["liq_distance"] = 0.38
     g = st.guards(conn, run_id=RUN, account=account, positions=positions)
-    assert g["margin"] == "INFO"          # latest margin_ratio row, not the CRITICAL pnl one
+    assert g["margin"] == "ok"
+
+
+def test_guards_margin_warn():
+    conn = seeded_conn()
+    account, positions = st.account_and_positions(conn, run_id=RUN, instruments=INSTRUMENTS)
+    positions = [positions[0]]
+    positions[0]["liq_distance"] = 0.33
+    g = st.guards(conn, run_id=RUN, account=account, positions=positions)
+    assert g["margin"] == "WARN"
+
+
+def test_guards_margin_critical():
+    conn = seeded_conn()
+    account, positions = st.account_and_positions(conn, run_id=RUN, instruments=INSTRUMENTS)
+    positions = [positions[0]]
+    positions[0]["liq_distance"] = 0.27
+    g = st.guards(conn, run_id=RUN, account=account, positions=positions)
+    assert g["margin"] == "CRITICAL"
+
+
+def test_guards_margin_ok_when_no_positions():
+    conn = seeded_conn()
+    account, _positions = st.account_and_positions(conn, run_id=RUN, instruments=INSTRUMENTS)
+    g = st.guards(conn, run_id=RUN, account=account, positions=[])
+    assert g["margin"] == "ok"
 
 
 def test_guards_halted_and_reconciliation():
