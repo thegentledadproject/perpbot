@@ -26,6 +26,11 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Scripts are streamed to the box through a pipe into plink. PS 5.1 encodes
+# that pipe with $OutputEncoding, whose default writes a UTF-8 BOM that bash
+# then reads as part of the shebang line. BOM-less UTF-8, explicitly.
+$OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+
 if ($Bootstrap -and (-not $RepoUrl)) {
     Write-Error "-RepoUrl is required when -Bootstrap is set"
     exit 1
