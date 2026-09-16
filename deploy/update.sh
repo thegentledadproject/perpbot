@@ -19,10 +19,13 @@ cd /opt/polyperps
 
 sudo -u polyperps git fetch --prune origin
 
+# --force: the box runs exactly what is committed. A previous deploy that
+# died mid-checkout leaves tracked files modified, and without --force that
+# blocks every later deploy with "local changes would be overwritten".
 if sudo -u polyperps git rev-parse --verify --quiet "origin/${REF}" >/dev/null; then
-  sudo -u polyperps git checkout --detach "origin/${REF}"
+  sudo -u polyperps git checkout --force --detach "origin/${REF}"
 else
-  sudo -u polyperps git checkout --detach "${REF}"
+  sudo -u polyperps git checkout --force --detach "${REF}"
 fi
 
 sudo -u polyperps .venv/bin/pip install -e . --quiet
