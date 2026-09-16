@@ -292,8 +292,8 @@ def test_build_state_empty_run():
     assert s["road"]["paper_days"] == 0.0 and s["road"]["paper_days_target"] == 14
     assert s["road"]["native_days_required"] == 60
     assert s["road"]["funding_periods_required"] == 1000
-    # no ticks at all: the whole 48 h window is one gap per instrument
-    assert s["feed"]["tick_gaps_48h"] == 2
+    # no ticks at all: the whole 30 min window is one gap per instrument
+    assert s["feed"]["tick_gaps_30m"] == 2
     assert s["feed"]["instruments"] == [
         {"instrument_id": 6, "last_tick_age_s": None, "last_funding_ts": None},
         {"instrument_id": 7, "last_tick_age_s": None, "last_funding_ts": None},
@@ -322,7 +322,7 @@ def test_build_state_run_and_feed():
     feed = s["feed"]
     assert feed["instruments"][0]["last_tick_age_s"] == pytest.approx(10.0)   # last tick at T0-10s
     # leading gap (window start -> first tick) + the 90 s hole; trailing 10 s is not a gap
-    assert feed["tick_gaps_48h"] == 2
+    assert feed["tick_gaps_30m"] == 2
     assert feed["funding_gaps_48h"] == 1      # no funding rows: the empty window is one gap
     assert feed["rejections_48h"] == 0
 

@@ -82,7 +82,7 @@ All reads go through existing `polyperps/storage/db.py` helpers (`load_sim_accou
   },
   "feed": {
     "instruments": [{"instrument_id": 6, "last_tick_age_s": 2.1, "last_funding_ts": "..."}],
-    "tick_gaps_48h": 0, "funding_gaps_48h": 0, "rejections_48h": 0
+    "tick_gaps_30m": 0, "funding_gaps_48h": 0, "rejections_48h": 0   // tick window is 30 min: ~15 stored ticks/s make a 48 h scan a 20 s+ query on the box
   },
   "decisions": [{"ts": "...", "instrument_id": 6, "note": "hold", "state_before": "OPEN",
                  "target": "…", "verdicts": {...}, "client_order_id": null}],   // newest first, last 50
@@ -125,7 +125,7 @@ Rules that matter:
 
 ## 7. Testing
 
-- `tests/test_dashboard_state.py`: schema created via `db.connect(":memory:")`; rows inserted through the same helpers the router uses. Cases: (a) empty run → `account` null, `positions` empty, `road.clean` true, `started_at` null; (b) one LONG and one SHORT with known cash/marks/entries → equity, unrealized, per-position pnl, liq_distance, adverse_move, funding_paid, gross exposure asserted against hand-computed values; (c) HALTED instrument → in `guards.halted`, `road.clean` false; (d) margin alerts WARN then ok → `guards.margin` follows the latest row; (e) a CRITICAL alert → `clean` false; (f) ticks with a >30 s hole → `tick_gaps_48h` 1; (g) unknown instruments → `cluster_net` null, names `inst 6`.
+- `tests/test_dashboard_state.py`: schema created via `db.connect(":memory:")`; rows inserted through the same helpers the router uses. Cases: (a) empty run → `account` null, `positions` empty, `road.clean` true, `started_at` null; (b) one LONG and one SHORT with known cash/marks/entries → equity, unrealized, per-position pnl, liq_distance, adverse_move, funding_paid, gross exposure asserted against hand-computed values; (c) HALTED instrument → in `guards.halted`, `road.clean` false; (d) margin alerts WARN then ok → `guards.margin` follows the latest row; (e) a CRITICAL alert → `clean` false; (f) ticks with a >30 s hole → `tick_gaps_30m` counts it, pinned against `find_gaps`; (g) unknown instruments → `cluster_net` null, names `inst 6`.
 - `tests/test_dashboard_server.py`: server on port 0 in a thread against a temp DB: `/` is HTML containing `/api/state`; `/api/state` is JSON with the top-level keys; `/nope` 404; DB path deleted → 503; `POST /` 405/404; the connection is read-only (a write attempt through the same URI raises).
 - `tests/test_deploy_files.py`: the new unit is covered by the existing "never enables live" checks and additionally must carry `CAP_NET_BIND_SERVICE` and reference an existing script path.
 - No JS test harness: `index.html` is checked by the server test for the `/api/state` reference and by eye on the box after the first deploy.

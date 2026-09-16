@@ -232,7 +232,9 @@ def is_clean(conn, *, run_id: str) -> bool:
 
 TICK_GAP = timedelta(seconds=30)      # same defaults as scripts/gap_report.py
 FUNDING_GAP = timedelta(hours=2)
-FEED_WINDOW = timedelta(hours=48)
+FEED_WINDOW = timedelta(hours=48)       # funding gaps and rejections
+TICK_WINDOW = timedelta(minutes=30)     # tick gaps: ~15 ticks/s stored, so 48 h is
+                                        # millions of rows and a 20 s+ scan on the box
 
 _GAP_TABLES = {"ticks": "exchange_ts", "funding_rates": "exchange_ts"}  # whitelisted names
 
@@ -243,7 +245,7 @@ def count_gaps(conn, *, table: str, instrument_id: int, max_gap: timedelta,
 
     Same answer as storage.gaps.find_gaps (leading gap, internal gaps, trailing
     gap; one gap when the window is empty) without loading the window's rows:
-    48 h of ticks is ~700k rows, which OOM-killed the dashboard on the box.
+    48 h of ticks is millions of rows, which OOM-killed the dashboard on the box.
     """
     col = _GAP_TABLES[table]
     limit = max_gap.total_seconds()
@@ -307,14 +309,14 @@ def feed_health(conn, *, instrument_ids: Sequence[int], now: datetime) -> dict:
         age = (now - datetime.fromisoformat(last_tick)).total_seconds() if last_tick else None
         per.append({"instrument_id": iid, "last_tick_age_s": age, "last_funding_ts": last_funding})
         tick_gaps += count_gaps(conn, table="ticks", instrument_id=iid, max_gap=TICK_GAP,
-                                start=start, end=now)
+                                start=now - TICK_WINDOW, end=now)
         funding_gaps += count_gaps(conn, table="funding_rates", instrument_id=iid,
                                    max_gap=FUNDING_GAP, start=start, end=now)
         (n,) = conn.execute(
             "SELECT COUNT(*) FROM rejections WHERE instrument_id=? AND at >= ?",
             (iid, _iso(start))).fetchone()
         rejections += n
-    return {"instruments": per, "tick_gaps_48h": tick_gaps, "funding_gaps_48h": funding_gaps,
+    return {"instruments": per, "tick_gaps_30m": tick_gaps, "funding_gaps_48h": funding_gaps,
             "rejections_48h": rejections}
 
 

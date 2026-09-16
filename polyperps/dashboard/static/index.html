@@ -85,7 +85,7 @@
     <div class="col">
       <div class="panel"><div class="h">Guards</div><div id="guards" class="col"></div>
         <div class="hint">WARN is expected at 3x: the 35 % line is crossed at entry.</div></div>
-      <div class="panel" style="flex-grow:1"><div class="h">Feed health · 48 h</div><div id="feed" class="col"></div></div>
+      <div class="panel" style="flex-grow:1"><div class="h">Feed health</div><div id="feed" class="col"></div></div>
     </div>
   </div>
 
@@ -195,7 +195,7 @@
 
     var lastFunding = f.instruments.map(function (x) { return x.last_funding_ts; }).filter(Boolean).sort().pop();
     document.getElementById('feed').innerHTML = [
-      ['tick gaps', f.tick_gaps_48h], ['funding gaps', f.funding_gaps_48h], ['rejections', f.rejections_48h], ['last funding row', hhmm(lastFunding)]
+      ['tick gaps · 30 min', f.tick_gaps_30m], ['funding gaps · 48 h', f.funding_gaps_48h], ['rejections · 48 h', f.rejections_48h], ['last funding row', hhmm(lastFunding)]
     ].concat(f.instruments.map(function (x) { return ['last tick · ' + x.instrument_id, x.last_tick_age_s == null ? 'none' : Math.round(x.last_tick_age_s) + ' s']; }))
      .map(function (x) { return '<div class="kv"><span>' + x[0] + '</span><span>' + x[1] + '</span></div>'; }).join('');
 
