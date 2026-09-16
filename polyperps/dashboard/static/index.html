@@ -113,7 +113,7 @@
   function levelColor(l) { return l === 'CRITICAL' ? CRIT : l === 'WARN' ? WARN : l === 'ok' || l === 'INFO' ? GOOD : MUTE; }
   function name(id) { var p = (S.positions || []).filter(function (x) { return x.instrument_id === id; })[0]; return p ? p.name : 'inst ' + id; }
   function ids() { return (S.feed.instruments || []).map(function (f) { return f.instrument_id; }); }
-  function meter(p, floorPct, cls) { return '<div class="meter ' + (cls || '') + '"><i style="width:' + Math.max(0, Math.min(100, p)) + '%"></i>' + (floorPct == null ? '' : '<span class="floor" style="left:' + floorPct + '%"></span>') + '</div>'; }
+  function meter(p, floorPct, cls, fill) { return '<div class="meter ' + (cls || '') + '"><i style="width:' + Math.max(0, Math.min(100, p)) + '%' + (fill ? ';background:' + fill : '') + '"></i>' + (floorPct == null ? '' : '<span class="floor" style="left:' + floorPct + '%"></span>') + '</div>'; }
 
   function render() {
     if (!S) return;
@@ -155,7 +155,7 @@
     var sel = pos.filter(function (p) { return p.instrument_id === selected; })[0];
     if (sel) {
       var adv = sel.adverse_move;
-      function m(label, value, p, floor, fill, note) { return '<div class="col" style="gap:5px"><div class="kv"><span>' + label + '</span><span>' + value + '</span></div>' + meter(p, floor, 'm6').replace('<i style', '<i style="background:' + fill + ';" data-x') + '<div class="hint">' + note + '</div></div>'; }
+      function m(label, value, p, floor, fill, note) { return '<div class="col" style="gap:5px"><div class="kv"><span>' + label + '</span><span>' + value + '</span></div>' + meter(p, floor, 'm6', fill) + '<div class="hint">' + note + '</div></div>'; }
       document.getElementById('detail').innerHTML = '<div class="col" style="margin-top:6px;border-top:1px solid var(--line);padding-top:12px;gap:12px">' +
         '<div class="kv"><span style="color:var(--hi)">' + sel.instrument_id + ' ' + esc(sel.name) + ' ' + sel.side + ' · guard distances</span><span class="hint">' + (sel.opened_at ? 'opened ' + esc(sel.opened_at.slice(0, 16)) + 'Z' : '') + '</span></div>' +
         m('liquidation distance', pct(sel.liq_distance, 0), 100 * sel.liq_distance, 25, sel.liq_distance > 0.30 ? 'var(--accent)' : sel.liq_distance > 0.25 ? WARN : CRIT, 'exit when it falls to the 25 % floor (marker)') +
@@ -171,10 +171,10 @@
       var head, note, color;
       if (tab === 'decisions') {
         head = e.note; color = /^enter|strategy|flip/.test(e.note) ? GOOD : /liq|funding|kill|reject|halt/.test(e.note) ? SERIOUS : MUTE;
-        note = Object.keys(e.verdicts || {}).map(function (k) { return k + ' ' + e.verdicts[k]; }).join(' · ') + (e.client_order_id ? ' · ' + esc(e.client_order_id) : '');
+        note = Object.keys(e.verdicts || {}).map(function (k) { return esc(k) + ' ' + esc(e.verdicts[k]); }).join(' · ') + (e.client_order_id ? ' · ' + esc(e.client_order_id) : '');
       } else {
         head = e.level + ' ' + e.kind; color = levelColor(e.level);
-        note = Object.keys(e.detail || {}).slice(0, 4).map(function (k) { return k + ' ' + esc(JSON.stringify(e.detail[k])); }).join(' · ');
+        note = Object.keys(e.detail || {}).slice(0, 4).map(function (k) { return esc(k) + ' ' + esc(JSON.stringify(e.detail[k])); }).join(' · ');
       }
       return '<div class="ev"><div class="mute">' + hhmm(e.ts) + '</div><div style="color:var(--ink2)">' + (e.instrument_id == null ? '—' : e.instrument_id) + '</div>' +
         '<div><div style="display:flex;align-items:center;gap:6px">' + lamp(color) + '<span style="color:var(--hi)">' + esc(head) + '</span></div><div class="hint">' + note + '</div></div></div>';
