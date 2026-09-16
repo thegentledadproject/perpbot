@@ -110,8 +110,21 @@ if ($Bootstrap) {
     Write-Host "== running bootstrap.sh =="
     Invoke-Plink -RemoteArgs @("sudo bash /tmp/bootstrap.sh '$RepoUrl' '$Ref'")
 } else {
+    $UpdateScript = Join-Path $PSScriptRoot "update.sh"
+
+    # Stream the LOCAL update.sh, not the box's copy: the box's copy is the
+    # one from the previous deploy, and bash reading a script that git
+    # checkout replaces mid-run is undefined.
+    Write-Host "== copying deploy/update.sh to the box =="
+    $updateText = [System.IO.File]::ReadAllText($UpdateScript)
+    $updateText | & $Plink -load $Session -batch "tr -d '\r' > /tmp/update.sh"
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "plink (copy update.sh) exited with code $LASTEXITCODE"
+        exit $LASTEXITCODE
+    }
+
     Write-Host "== running update.sh =="
-    Invoke-Plink -RemoteArgs @("sudo bash /opt/polyperps/deploy/update.sh '$Ref'")
+    Invoke-Plink -RemoteArgs @("sudo bash /tmp/update.sh '$Ref'")
 }
 
 Write-Host "== recent logs =="
