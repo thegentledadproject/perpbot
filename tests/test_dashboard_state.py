@@ -321,7 +321,45 @@ def test_build_state_run_and_feed():
     assert s["locks"]["live_env"] is True and s["locks"]["signal_validated"] is True
     feed = s["feed"]
     assert feed["instruments"][0]["last_tick_age_s"] == pytest.approx(10.0)   # last tick at T0-10s
-    # the 48 h window starts empty (one leading gap) and has the 90 s hole: >= 2 gaps
-    assert feed["tick_gaps_48h"] >= 2
-    assert feed["funding_gaps_48h"] >= 1
+    # leading gap (window start -> first tick) + the 90 s hole; trailing 10 s is not a gap
+    assert feed["tick_gaps_48h"] == 2
+    assert feed["funding_gaps_48h"] == 1      # no funding rows: the empty window is one gap
     assert feed["rejections_48h"] == 0
+
+
+def test_count_gaps_matches_find_gaps():
+    """count_gaps runs inside SQLite; it must give find_gaps' answer for every case."""
+    from polyperps.storage.gaps import find_gaps
+
+    conn = connect(":memory:")
+    start, end = T0 - timedelta(hours=1), T0
+    # instrument 1: empty. 2: first tick 5 min in (leading gap only), then dense to the end.
+    t = start + timedelta(minutes=5)
+    while t <= end:
+        insert_tick(conn, tick(2, t)); t += timedelta(seconds=10)
+    # 3: dense from start, one 45 s hole in the middle, dense to the end.
+    t = start
+    while t <= start + timedelta(minutes=30):
+        insert_tick(conn, tick(3, t)); t += timedelta(seconds=10)
+    t = start + timedelta(minutes=30, seconds=45)
+    while t <= end:
+        insert_tick(conn, tick(3, t)); t += timedelta(seconds=10)
+    # 4: dense from start, stops 2 min before the end (trailing gap only).
+    t = start
+    while t <= end - timedelta(minutes=2):
+        insert_tick(conn, tick(4, t)); t += timedelta(seconds=10)
+    for iid, expected in ((1, 1), (2, 1), (3, 1), (4, 1)):
+        ours = st.count_gaps(conn, table="ticks", instrument_id=iid, max_gap=st.TICK_GAP,
+                             start=start, end=end)
+        theirs = len(find_gaps(conn, iid, table="ticks", max_gap=st.TICK_GAP, start=start, end=end))
+        assert ours == theirs == expected, (iid, ours, theirs)
+    # 5: one tick only, in the middle -> leading and trailing gaps
+    insert_tick(conn, tick(5, start + timedelta(minutes=30)))
+    assert st.count_gaps(conn, table="ticks", instrument_id=5, max_gap=st.TICK_GAP,
+                         start=start, end=end) == 2
+    # a 30 s spacing is exactly max_gap and must not count (find_gaps uses strict >)
+    t = start
+    while t <= end:
+        insert_tick(conn, tick(6, t)); t += timedelta(seconds=30)
+    assert st.count_gaps(conn, table="ticks", instrument_id=6, max_gap=st.TICK_GAP,
+                         start=start, end=end) == 0

@@ -19,7 +19,6 @@ from polyperps.risk.portfolio_exposure import EXPOSURE, cluster_of
 from polyperps.signal import base as signal_base
 from polyperps.signal.sufficiency import BAR, NATIVE_SOURCES, check_dataset
 from polyperps.storage import db
-from polyperps.storage.gaps import find_gaps
 
 
 class InstrumentInfo(Protocol):
@@ -234,6 +233,40 @@ def is_clean(conn, *, run_id: str) -> bool:
 TICK_GAP = timedelta(seconds=30)      # same defaults as scripts/gap_report.py
 FUNDING_GAP = timedelta(hours=2)
 FEED_WINDOW = timedelta(hours=48)
+
+_GAP_TABLES = {"ticks": "exchange_ts", "funding_rates": "exchange_ts"}  # whitelisted names
+
+
+def count_gaps(conn, *, table: str, instrument_id: int, max_gap: timedelta,
+               start: datetime, end: datetime) -> int:
+    """Number of holes longer than max_gap in [start, end], counted inside SQLite.
+
+    Same answer as storage.gaps.find_gaps (leading gap, internal gaps, trailing
+    gap; one gap when the window is empty) without loading the window's rows:
+    48 h of ticks is ~700k rows, which OOM-killed the dashboard on the box.
+    """
+    col = _GAP_TABLES[table]
+    limit = max_gap.total_seconds()
+    first, last, n = conn.execute(
+        f"SELECT MIN({col}), MAX({col}), COUNT(*) FROM {table} "
+        f"WHERE instrument_id=? AND {col} BETWEEN ? AND ?",
+        (instrument_id, _iso(start), _iso(end)),
+    ).fetchone()
+    if n == 0:
+        return 1
+    (internal,) = conn.execute(
+        f"SELECT COUNT(*) FROM ("
+        f"  SELECT (julianday({col}) - julianday(LAG({col}) OVER (ORDER BY {col}))) * 86400.0 AS d "
+        f"  FROM {table} WHERE instrument_id=? AND {col} BETWEEN ? AND ?"
+        f") WHERE d > ?",
+        (instrument_id, _iso(start), _iso(end), limit),
+    ).fetchone()
+    gaps = internal
+    if (datetime.fromisoformat(first) - start).total_seconds() > limit:
+        gaps += 1
+    if (end - datetime.fromisoformat(last)).total_seconds() > limit:
+        gaps += 1
+    return gaps
 PAPER_DAYS_TARGET = 14
 
 
@@ -270,9 +303,10 @@ def feed_health(conn, *, instrument_ids: Sequence[int], now: datetime) -> dict:
             "SELECT MAX(exchange_ts) FROM funding_rates WHERE instrument_id=?", (iid,)).fetchone()
         age = (now - datetime.fromisoformat(last_tick)).total_seconds() if last_tick else None
         per.append({"instrument_id": iid, "last_tick_age_s": age, "last_funding_ts": last_funding})
-        tick_gaps += len(find_gaps(conn, iid, table="ticks", max_gap=TICK_GAP, start=start, end=now))
-        funding_gaps += len(find_gaps(conn, iid, table="funding_rates", max_gap=FUNDING_GAP,
-                                      start=start, end=now))
+        tick_gaps += count_gaps(conn, table="ticks", instrument_id=iid, max_gap=TICK_GAP,
+                                start=start, end=now)
+        funding_gaps += count_gaps(conn, table="funding_rates", instrument_id=iid,
+                                   max_gap=FUNDING_GAP, start=start, end=now)
         (n,) = conn.execute(
             "SELECT COUNT(*) FROM rejections WHERE instrument_id=? AND at >= ?",
             (iid, _iso(start))).fetchone()
