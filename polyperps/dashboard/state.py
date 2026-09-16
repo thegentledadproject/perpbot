@@ -254,12 +254,15 @@ def count_gaps(conn, *, table: str, instrument_id: int, max_gap: timedelta,
     ).fetchone()
     if n == 0:
         return 1
+    # Epoch seconds + millisecond fraction (strftime %s truncates, %f is SS.SSS);
+    # 1 µs of slack absorbs float rounding so an exact max_gap spacing is not a gap.
+    secs = f"(strftime('%s', {{c}}) + strftime('%f', {{c}}) - strftime('%S', {{c}}))"
     (internal,) = conn.execute(
         f"SELECT COUNT(*) FROM ("
-        f"  SELECT (julianday({col}) - julianday(LAG({col}) OVER (ORDER BY {col}))) * 86400.0 AS d "
+        f"  SELECT {secs.format(c=col)} - {secs.format(c=f'LAG({col}) OVER (ORDER BY {col})')} AS d "
         f"  FROM {table} WHERE instrument_id=? AND {col} BETWEEN ? AND ?"
         f") WHERE d > ?",
-        (instrument_id, _iso(start), _iso(end), limit),
+        (instrument_id, _iso(start), _iso(end), limit + 1e-6),
     ).fetchone()
     gaps = internal
     if (datetime.fromisoformat(first) - start).total_seconds() > limit:
