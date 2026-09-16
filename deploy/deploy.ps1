@@ -115,4 +115,4 @@ if ($Bootstrap) {
 }
 
 Write-Host "== recent logs =="
-Invoke-Plink -RemoteArgs @("sudo journalctl -u polyperps-feed -u polyperps-paper -n 40 --no-pager")
+Invoke-Plink -RemoteArgs @("sudo journalctl -u polyperps-feed -u polyperps-paper -u polyperps-dashboard -n 40 --no-pager")

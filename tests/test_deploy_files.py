@@ -12,7 +12,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEPLOY_DIR = REPO_ROOT / "deploy"
 
-UNIT_FILES = ["polyperps-feed.service", "polyperps-paper.service"]
+UNIT_FILES = ["polyperps-feed.service", "polyperps-paper.service", "polyperps-dashboard.service"]
 SHELL_FILES = ["bootstrap.sh", "update.sh"]
 
 # All deploy files must be plain LF text, deploy.ps1 included - PowerShell
@@ -84,3 +84,18 @@ def test_shell_script_never_enables_live_trading(name):
 def test_no_carriage_returns(name):
     data = (DEPLOY_DIR / name).read_bytes()
     assert b"\r" not in data
+
+
+def test_dashboard_unit_binds_port_80_without_root():
+    text = (DEPLOY_DIR / "polyperps-dashboard.service").read_text(encoding="utf-8")
+    assert "AmbientCapabilities=CAP_NET_BIND_SERVICE" in text
+    assert "CapabilityBoundingSet=CAP_NET_BIND_SERVICE" in text
+    assert "User=polyperps" in text
+    assert "run_dashboard.py" in text
+
+
+def test_deploy_scripts_know_the_dashboard_unit():
+    for name in ("bootstrap.sh", "update.sh"):
+        assert "polyperps-dashboard" in (DEPLOY_DIR / name).read_text(encoding="utf-8")
+    assert "polyperps-dashboard" in (DEPLOY_DIR / "deploy.ps1").read_text(encoding="utf-8")
+    assert "POLYPERPS_DASHBOARD_BIND=0.0.0.0:80" in (DEPLOY_DIR / "env.example").read_text(encoding="utf-8")

@@ -70,13 +70,13 @@ fi
 echo "== systemd units =="
 # Gate the copy on content so a re-run of bootstrap.sh doesn't clobber an
 # operator's uncommented LoadCredential= lines in the installed paper unit.
-for unit in polyperps-feed.service polyperps-paper.service; do
+for unit in polyperps-feed.service polyperps-paper.service polyperps-dashboard.service; do
   if ! cmp -s "/opt/polyperps/deploy/${unit}" "/etc/systemd/system/${unit}"; then
     cp "/opt/polyperps/deploy/${unit}" "/etc/systemd/system/${unit}"
     systemctl daemon-reload
   fi
 done
-systemctl enable polyperps-feed polyperps-paper
+systemctl enable polyperps-feed polyperps-paper polyperps-dashboard
 
 cat <<'EOF'
 
@@ -90,8 +90,9 @@ cat <<'EOF'
      cd /opt/polyperps && sudo -u polyperps env $(grep -v '^#' /etc/polyperps/env | xargs)        .venv/bin/python scripts/store_fees.py
      cd /opt/polyperps && sudo -u polyperps env $(grep -v '^#' /etc/polyperps/env | xargs)        .venv/bin/python scripts/backfill.py --days 31 --interval 1h
 4. Start the services:
-     systemctl start polyperps-feed polyperps-paper
+     systemctl start polyperps-feed polyperps-paper polyperps-dashboard
 5. Watch them:
      journalctl -fu polyperps-feed
      journalctl -fu polyperps-paper
+     journalctl -fu polyperps-dashboard
 EOF
