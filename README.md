@@ -158,6 +158,15 @@ tails the last 40 lines of both units after every deploy.
 both scripts unwind through their `finally` block cleanly (see the soak
 runbook above).
 
+**Dashboard**: `polyperps-dashboard.service` serves a read-only page on
+`POLYPERPS_DASHBOARD_BIND` (`0.0.0.0:80` on the box) showing the paper account,
+positions with their guard distances, router decisions, alerts, feed health, the
+three live locks and the road-to-live counters, refreshed every 10 s from the DB
+(opened `mode=ro`; it cannot write). No auth, no TLS: reach is controlled only by
+the EC2 security group, so keep port 80 restricted to your own IP. Locally:
+`POLYPERPS_INSTRUMENT_IDS=6,7 PAPER_RUN_ID=paper-soak-1 .venv/Scripts/python scripts/run_dashboard.py`
+then open `http://127.0.0.1:8080`.
+
 After the first successful feed run from the EC2 box, add the egress-IP row
 to `docs/ops/eligibility-checklist.md` - the geo-block check is host-specific
 and the Malaysia-ISP entry there does not cover EC2.
