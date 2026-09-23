@@ -1,0 +1,17 @@
+[Unit]
+Description=polyperps tick retention (delete ticks/book snapshots past the window)
+
+[Service]
+Type=oneshot
+User=polyperps
+Group=polyperps
+WorkingDirectory=/opt/polyperps
+EnvironmentFile=/etc/polyperps/env
+ExecStart=/opt/polyperps/.venv/bin/python scripts/prune.py --days ${RETAIN_DAYS}
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/polyperps
+StandardOutput=journal
+StandardError=journal

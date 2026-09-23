@@ -70,13 +70,14 @@ fi
 echo "== systemd units =="
 # Gate the copy on content so a re-run of bootstrap.sh doesn't clobber an
 # operator's uncommented LoadCredential= lines in the installed paper unit.
-for unit in polyperps-feed.service polyperps-paper.service polyperps-dashboard.service; do
+for unit in polyperps-feed.service polyperps-paper.service polyperps-dashboard.service polyperps-prune.service polyperps-prune.timer; do
   if ! cmp -s "/opt/polyperps/deploy/${unit}" "/etc/systemd/system/${unit}"; then
     cp "/opt/polyperps/deploy/${unit}" "/etc/systemd/system/${unit}"
     systemctl daemon-reload
   fi
 done
 systemctl enable polyperps-feed polyperps-paper polyperps-dashboard
+systemctl enable --now polyperps-prune.timer
 
 cat <<'EOF'
 
