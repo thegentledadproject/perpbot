@@ -46,7 +46,9 @@ def vacuum_into(conn: sqlite3.Connection, db_path: str) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--days", type=int, default=3, help="retain this many days of ticks (default 3)")
+    # RETAIN_DAYS from the env, not the unit's ExecStart: an unset var there became `--days ''` and failed every run.
+    days = int(os.environ.get("RETAIN_DAYS") or 3)
+    ap.add_argument("--days", type=int, default=days, help="retain this many days of ticks (default $RETAIN_DAYS or 3)")
     ap.add_argument("--vacuum", action="store_true", help="rewrite the file to shrink it (needs free disk)")
     args = ap.parse_args()
 
