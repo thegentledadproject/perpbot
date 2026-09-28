@@ -16,10 +16,11 @@ def test_prune_keeps_the_retention_window(tmp_path):
     conn = connect(tmp_path / "t.sqlite3")
     now = datetime.now(timezone.utc)
     _tick(conn, now - timedelta(days=5))
+    _tick(conn, now - timedelta(days=4))
     _tick(conn, now - timedelta(days=1))
     conn.commit()
 
-    deleted = prune(conn, now - timedelta(days=3))
+    deleted = prune(conn, now - timedelta(days=3), batch=1)
 
-    assert deleted["ticks"] == 1
+    assert deleted["ticks"] == 2
     assert conn.execute("SELECT COUNT(*) FROM ticks").fetchone()[0] == 1

@@ -22,14 +22,23 @@ from polyperps.config import load_settings
 TABLES = ("ticks", "book_snapshots")
 
 
-def prune(conn: sqlite3.Connection, cutoff: datetime) -> dict[str, int]:
-    """Delete rows with exchange_ts strictly before cutoff. Returns rows deleted per table."""
+def prune(conn: sqlite3.Connection, cutoff: datetime, batch: int = 50_000) -> dict[str, int]:
+    """Delete rows with exchange_ts strictly before cutoff. Returns rows deleted per table.
+
+    Batched with a checkpoint per batch: one big DELETE grew the WAL to the size of
+    everything deleted (650 MB) and filled the disk on 2026-09-28.
+    """
     iso = cutoff.isoformat()
     deleted = {}
     for table in TABLES:
-        deleted[table] = conn.execute(
-            f"DELETE FROM {table} WHERE exchange_ts < ?", (iso,)  # noqa: S608 - table names are literals above
-        ).rowcount
+        deleted[table] = 0
+        while n := conn.execute(
+            f"DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} WHERE exchange_ts < ? LIMIT ?)",  # noqa: S608 - table names are literals above
+            (iso, batch),
+        ).rowcount:
+            conn.commit()
+            conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+            deleted[table] += n
     conn.commit()
     return deleted
 
