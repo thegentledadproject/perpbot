@@ -1,8 +1,8 @@
 [Unit]
-Description=daily polyperps tick retention
+Description=hourly polyperps tick retention
 
 [Timer]
-OnCalendar=daily
+OnCalendar=hourly
 Persistent=true
 
 [Install]
