@@ -1,5 +1,6 @@
 """Part A §6.5: one fixed bar sequence through the backtest harness and through Portfolio +
-SimExecutor gives identical trades (time, side, quantity) and the same P&L to the cent."""
+SimExecutor gives identical trades (time, side, quantity) and the same P&L to the cent.
+The fixture has next open == close and no minute closes, so parity is proven for that latency case only."""
 
 from datetime import datetime, timedelta, timezone
 from decimal import ROUND_DOWN, Decimal
@@ -26,11 +27,12 @@ ROWS = [
     ("104", "104", "104", "104", "0", True, -1),       # 3  re-enter short
     ("104", "121", "104", "118", "0", True, 1),        # 4  short stop 119.60 hit intrabar; enter long at close
     ("118", "118", "118", "118", "0.012", True, 1),    # 5  long pays 1.2
-    ("118", "118", "118", "118", "0.012", True, 0),    # 6  paid 2.4 >= 2 % of notional: funding exit
-    ("118", "118", "118", "118", "0", True, 1),        # 7  enter long
+    ("118", "118", "118", "118", "0.012", True, 1),    # 6  paid 2.4 >= 2 % of notional: funding exit; re-enter
+    ("118", "118", "118", "118", "0", True, 1),        # 7  hold
     ("118", "120", "118", "120", "0", False, 1),       # 8  incomplete bar: exit data_gap, no entry
-    ("120", "120", "120", "120", "0", True, 0),        # 9  stay flat
-    ("120", "120", "120", "120", "0", True, 0),        # 10 last bar: only a fill price
+    ("120", "120", "120", "120", "0", True, 1),        # 9  enter long
+    ("120", "120", "108", "108", "0", True, 1),        # 10 liq 82.40: (108-82.40)/108 < 25 %: liq-distance exit; re-enter
+    ("108", "108", "108", "108", "0", True, 0),        # 11 last bar: only a fill price
 ]
 
 
@@ -101,9 +103,12 @@ async def test_backtest_and_router_trade_identically():
         (T0 + 4 * H, "sell", q(104)),    # ...re-enter short next bar
         (T0 + 4 * H, "buy", q(104)),     # stop at 119.60, intrabar
         (T0 + 5 * H, "buy", q(118)),     # enter long
-        (T0 + 7 * H, "sell", q(118)),    # funding-cost exit
-        (T0 + 8 * H, "buy", q(118)),     # enter long
+        (T0 + 7 * H, "sell", q(118)),    # funding-cost exit...
+        (T0 + 7 * H, "buy", q(118)),     # ...strategy still long: re-enter
         (T0 + 9 * H, "sell", q(118)),    # data_gap exit
+        (T0 + 10 * H, "buy", q(120)),    # enter long
+        (T0 + 11 * H, "sell", q(120)),   # liquidation-distance exit (stop 102 not touched)...
+        (T0 + 11 * H, "buy", q(108)),    # ...and re-enter
     ]
     assert r_trades == res.trades
     assert abs(r_pnl - res.equity[-1][1]) < Decimal("0.01")

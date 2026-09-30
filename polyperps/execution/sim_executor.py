@@ -124,6 +124,7 @@ class SimExecutor:
 
     def _fill(self, order: OrderRequest, now: datetime, quantity: Decimal | None = None,
               price: Decimal | None = None) -> FillUpdate:
+        """Sim FillUpdate.fee = venue fee + half spread + impact (fill_cost); live fills carry the venue fee only."""
         qty = order.quantity if quantity is None else quantity
         px = self._marks[order.instrument_id] if price is None else price
         fee = fill_cost(notional_delta=qty * px, notional=self._notional, spread_bps=self._spread,
