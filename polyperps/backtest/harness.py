@@ -32,6 +32,11 @@ from polyperps.signal.sufficiency import BAR
 Kind = Literal["funding", "fill", "fill_unavailable", "gap_flatten", "mark", "stop", "guard_exit"]
 _Q = Decimal("0.00000001")
 
+# Bump on any change to the harness's trading rules or cost model. Validation records carry it and
+# the live gate (signal.base) accepts only records at the current version.
+# 1 = Phase 1 harness (flip in one fill, no guards); 2 = Part A router parity.
+HARNESS_VERSION = 2
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class LedgerRow:
