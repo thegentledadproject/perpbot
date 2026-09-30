@@ -23,7 +23,7 @@ from polyperps.execution.types import (
     PositionLocalRow, ReconcileNow, State,
 )
 from polyperps.monitor.alerts import Alert, Alerter, margin_alert, pnl_alert
-from polyperps.risk.kill_switch import Action
+from polyperps.risk.kill_switch import Action, loss_limit
 from polyperps.risk.liquidation_guard import (
     LIMITS, Reject, Resize, RiskLimits, Verdict, check_open, funding_exit_due, stop_price, verdict_label, vet_entry,
 )
@@ -128,10 +128,7 @@ class InstrumentRouter:
             self._record(target=None, verdicts={}, intent=None, cid=None, note="skip:no_close")
             return
         if kill == "shutdown":
-            if self.state is State.OPEN:
-                await self._exit(mark, "kill_shutdown", target=None)
-            self._alert("CRITICAL", "kill_switch", action="shutdown")
-            self._set_state(State.HALTED)
+            await self.shutdown(mark)
             return
         if len(history) < getattr(self.strategy, "warmup", 0):
             # Same rule as the backtest harness: no target call until the strategy has its
@@ -336,6 +333,18 @@ class InstrumentRouter:
         self._pending_cid = None
         self._set_state(State.HALTED)
 
+    async def shutdown(self, mark: Decimal) -> None:
+        """Kill switch / loss limit (Part A §5): flatten if a position is held, then HALTED until
+        --clear-halt. An already-HALTED router still flattens a position that filled after the halt."""
+        if self.state is State.LIQUIDATED or (self.state is State.HALTED and self.size == 0):
+            return
+        was_halted = self.state is State.HALTED
+        if self.size != 0 and self.state in (State.OPEN, State.HALTED):
+            await self._exit(mark, "kill_shutdown", target=None)
+        if not was_halted:
+            self._alert("CRITICAL", "kill_switch", action="shutdown")
+        self._set_state(State.HALTED)
+
     def clear_halt(self) -> None:
         """Operator decision: leave HALTED (or LIQUIDATED) for whatever the book says."""
         self._set_state(State.OPEN if self.size != 0 else State.FLAT)
@@ -371,10 +380,35 @@ class Portfolio:
     async def on_bar(self, histories: Mapping[int, Sequence[Bar]], kill: Action) -> None:
         async with self._lock:
             snapshot = await self.executor.snapshot()
+            if kill == "shutdown":
+                await self._shutdown(snapshot, histories)
+                return
             for iid, history in histories.items():
                 router = self.routers.get(iid)
                 if router is not None and history:
                     await router.on_bar(history, snapshot, kill)
+
+    async def _shutdown(self, snapshot: AccountSnapshot, histories: Mapping[int, Sequence[Bar]]) -> None:
+        """Flatten every open position and halt EVERY router, not only the ones whose bar just
+        closed (the runner passes one instrument per call). A persisting breach alerts once."""
+        if any(r.state not in (State.HALTED, State.LIQUIDATED) for r in self.routers.values()):
+            cause = "loss_limit" if loss_limit(snapshot.equity, self.start_equity) == "shutdown" else "divergence"
+            self.alerter.emit(Alert(level="CRITICAL", kind=cause, instrument_id=None,
+                                    detail={"equity": str(snapshot.equity), "start_equity": str(self.start_equity)},
+                                    ts=snapshot.ts))
+        # ponytail: runs on every shutdown bar, so a position that fills after the shutdown (an entry
+        # in flight) stays open, stop-guarded, until the next bar; upgrade path: flatten on the late
+        # fill itself (InstrumentRouter.handle_event).
+        for router in self.routers.values():
+            hist = histories.get(router.instrument_id)
+            pos = snapshot.position(router.instrument_id)
+            if hist and hist[-1].close is not None:
+                mark = hist[-1].close
+            elif pos is not None and pos.size != 0:
+                mark = pos.notional / abs(pos.size)
+            else:
+                mark = router.entry or Decimal(0)
+            await router.shutdown(mark)
 
     async def on_fast(self, marks: Mapping[int, Decimal]) -> None:
         async with self._lock:

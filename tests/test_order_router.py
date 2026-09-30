@@ -11,6 +11,7 @@ from polyperps.execution.types import AccountSnapshot, FillUpdate, Intent, Order
 from polyperps.exchange.types import SourceType
 from polyperps.monitor.alerts import Alerter, SqliteSink
 from polyperps.monitor.decision_trail import reconstruct
+from polyperps.risk.kill_switch import evaluate
 from polyperps.risk.liquidation_guard import Allow, Reject, Resize
 from polyperps.storage.db import connect, get_order, get_positions_local, list_alerts, list_decisions
 
@@ -445,3 +446,46 @@ async def test_portfolio_without_start_equity_emits_no_pnl_alert():
     ex._cash = Decimal(1)                     # any drawdown you like: nothing to compare against
     await pf.on_fast({6: Decimal(100)})
     assert "pnl_drawdown" not in kinds(conn)
+
+
+async def test_loss_limit_shutdown_flattens_every_router_and_halts():
+    conn = connect(":memory:")
+    ex = SimExecutor("r", equity=Decimal(1000), taker_fee_rate=FEE, clock=lambda: T0)
+    ex.update_mark(6, Decimal(100)); ex.update_mark(7, Decimal(100))
+    alerter = Alerter("r", [SqliteSink(conn)])
+    r6 = InstrumentRouter(run_id="r", instrument_id=6, category="crypto", strategy=Strat(1), executor=ex, conn=conn,
+                          alerter=alerter, categories=CATS, clock=lambda: T0)
+    r7 = InstrumentRouter(run_id="r", instrument_id=7, category="crypto", strategy=Strat(-1), executor=ex, conn=conn,
+                          alerter=alerter, categories=CATS, clock=lambda: T0)
+    pf = Portfolio(run_id="r", executor=ex, conn=conn, alerter=alerter, routers={6: r6, 7: r7},
+                   start_equity=Decimal(1000))
+    await pf.on_bar({6: [bar(0)], 7: [dc_replace(bar(0), instrument_id=7)]}, "run"); await pump(pf, ex)
+    assert r6.size > 0 and r7.size < 0
+    ex._cash -= Decimal(150)                                                  # a -15 % day
+    kill = evaluate(live_sharpe=None, backtest_sharpe=None, mode="paper",
+                    equity=(await ex.snapshot()).equity, start_equity=pf.start_equity)
+    assert kill == "shutdown"
+    await pf.on_bar({6: [bar(0), bar(1)]}, kill); await pump(pf, ex)          # only instrument 6's bar closed
+    assert r6.state is State.HALTED and r7.state is State.HALTED
+    assert r6.size == 0 and r7.size == 0 and get_order(conn, "r-7-2").reason == "kill_shutdown"
+    await pf.on_bar({7: [dc_replace(bar(1), instrument_id=7)]}, kill)        # still breached: no second alert
+    loss = [a for a in list_alerts(conn, "r") if a[2] == "loss_limit"]
+    assert len(loss) == 1 and loss[0][1] == "CRITICAL"
+
+
+async def test_position_filled_after_shutdown_is_flattened_on_next_shutdown_bar():
+    conn = connect(":memory:")
+    ex = SimExecutor("r", equity=Decimal(1000), taker_fee_rate=FEE, clock=lambda: T0)
+    ex.update_mark(6, Decimal(100))
+    alerter = Alerter("r", [SqliteSink(conn)])
+    r6 = InstrumentRouter(run_id="r", instrument_id=6, category="crypto", strategy=Strat(1), executor=ex, conn=conn,
+                          alerter=alerter, categories=CATS, clock=lambda: T0)
+    pf = Portfolio(run_id="r", executor=ex, conn=conn, alerter=alerter, routers={6: r6}, start_equity=Decimal(1000))
+    await pf.on_bar({6: [bar(0)]}, "run")                                     # entry sent, fill not yet pumped
+    assert r6.state is State.ENTRY_PENDING
+    await pf.on_bar({6: [bar(1)]}, "shutdown")                                # halts with the entry in flight
+    assert r6.state is State.HALTED
+    await pump(pf, ex)                                                        # the entry fills after the halt
+    assert r6.size > 0 and r6.state is State.HALTED
+    await pf.on_bar({6: [bar(2)]}, "shutdown"); await pump(pf, ex)
+    assert r6.size == 0 and r6.state is State.HALTED
