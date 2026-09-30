@@ -20,7 +20,7 @@ from polyperps.execution.executor import Executor, ExecutorTimeout, ShadowRefuse
 from polyperps.execution.reconciliation import Mismatch, diff
 from polyperps.execution.types import (
     AccountSnapshot, DecisionRow, FillUpdate, Intent, OrderAck, OrderRequest, OrderRow, OrderUpdate,
-    PositionLocalRow, ReconcileNow, State,
+    PositionLocalRow, PositionView, ReconcileNow, State,
 )
 from polyperps.monitor.alerts import Alert, Alerter, margin_alert, pnl_alert
 from polyperps.risk.kill_switch import Action, loss_limit
@@ -48,6 +48,14 @@ def apply_guards(intent: Intent, verdicts: Sequence[tuple[str, Verdict]]) -> tup
     notional = (intent.notional * qty / intent.quantity).quantize(Decimal("0.01"))
     return Intent(instrument_id=intent.instrument_id, side=intent.side, quantity=qty, notional=notional,
                   reduce_only=intent.reduce_only, reason=intent.reason), labels
+
+
+async def place_exchange_stop(executor: Executor, pos: PositionView, limits: RiskLimits = LIMITS) -> Decimal:
+    """Invariant (Part A §4): a venue position always has a venue stop. Placed at the router's stop
+    distance from the EXCHANGE entry price, so it holds whatever our local row says."""
+    trigger = stop_price(side="long" if pos.size > 0 else "short", entry=pos.entry_price, limits=limits)
+    await executor.place_stop(pos.instrument_id, trigger)
+    return trigger
 
 
 class InstrumentRouter:
@@ -484,9 +492,16 @@ class Portfolio:
                     await self.executor.cancel(m.remote)
                     self.alerter.emit(Alert(level="WARN", kind="unknown_order", instrument_id=None, detail=detail, ts=now))
                 elif m.kind == "missing_stop":
+                    pos = snapshot.position(m.instrument_id)
+                    trigger = await place_exchange_stop(self.executor, pos,
+                                                        router.limits if router is not None else LIMITS)
                     if router is not None:
-                        await router.replace_stop()
-                    self.alerter.emit(Alert(level="WARN", kind="stop_missing", instrument_id=m.instrument_id, detail=detail, ts=now))
+                        router.stop_trigger = trigger
+                        router._persist()
+                    self.alerter.emit(Alert(level="WARN", kind="stop_missing", instrument_id=m.instrument_id,
+                                            detail={**detail, "trigger": str(trigger)}, ts=now))
+                    self.alerter.emit(Alert(level="INFO", kind="stop_placed", instrument_id=m.instrument_id,
+                                            detail={"trigger": str(trigger)}, ts=now))
                 elif m.kind == "stop_without_position":
                     await self.executor.cancel_stop(m.instrument_id)
                     self.alerter.emit(Alert(level="INFO", kind="stop_orphan_cancelled", instrument_id=m.instrument_id,

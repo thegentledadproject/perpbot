@@ -2,14 +2,17 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 
+import pytest
+
 from polyperps.backtest.bars import Bar
 from polyperps.execution.order_router import InstrumentRouter, Portfolio
 from polyperps.execution.live_executor import ShadowExecutor
 from polyperps.execution.reconciliation import Mismatch, diff
 from polyperps.execution.sim_executor import SimExecutor
-from polyperps.execution.types import AccountSnapshot, PositionLocalRow, PositionView, State
+from polyperps.execution.types import AccountSnapshot, OrderRequest, PositionLocalRow, PositionView, State
 from polyperps.exchange.types import SourceType
 from polyperps.monitor.alerts import Alerter, SqliteSink
+from polyperps.risk.liquidation_guard import stop_price
 from polyperps.storage.db import connect, list_alerts
 
 T0 = datetime(2026, 9, 12, 12, 0, tzinfo=timezone.utc)
@@ -50,8 +53,8 @@ def test_diff_stop_drift_and_missing_stop_and_unknown_position():
               run_id="r", known_orders=set())
     assert [m.kind for m in ms] == ["stop_drift"]
     ms = diff(local={6: local(6, State.OPEN, "1")}, remote=remote([pv(6, "1"), pv(8, "3")]), run_id="r", known_orders=set())
-    assert [m.kind for m in ms] == ["missing_stop", "size"]
-    assert ms[1].instrument_id == 8 and ms[1].local == "0"
+    assert [(m.kind, m.instrument_id) for m in ms] == [("missing_stop", 6), ("missing_stop", 8), ("size", 8)]
+    assert ms[2].local == "0"
 
 
 class Strat:
@@ -100,13 +103,15 @@ async def test_reconcile_size_mismatch_halts():
     assert router.state is State.HALTED and any(a[1] == "CRITICAL" for a in list_alerts(conn, "r"))
 
 
-def test_diff_skips_size_and_stop_checks_for_pending_local_rows():
+def test_diff_skips_size_checks_for_pending_rows_but_never_the_stop():
     # An order is in flight (ENTRY_PENDING): the persisted size is still pre-fill (0) while the
-    # remote already reflects the fill. That's not a reconciliation problem - the fill handler
-    # owns this row's transition - so diff() must not raise size or missing_stop for it.
+    # remote already reflects the fill. The size is the fill handler's business - but a venue
+    # position without a venue stop is a mismatch whatever the local state (Part A §4).
     ms = diff(local={6: local(6, State.ENTRY_PENDING, "0")}, remote=remote([pv(6, "1")]),
               run_id="r", known_orders=set())
-    assert ms == []
+    assert [m.kind for m in ms] == ["missing_stop"]
+    assert diff(local={6: local(6, State.ENTRY_PENDING, "0")}, remote=remote([pv(6, "1")], stops={6: Decimal(85)}),
+                run_id="r", known_orders=set()) == []
 
 
 async def test_reconcile_size_mismatch_halt_is_idempotent():
@@ -141,3 +146,39 @@ async def test_reconcile_in_shadow_records_refused_writes_and_keeps_running():
     assert [m.kind for m in ms] == ["unknown_order"]
     kinds = [a[2] for a in list_alerts(conn, "r")]
     assert "shadow_refused" in kinds and "unknown_order" not in kinds
+
+
+STATES = [State.OPEN, State.HALTED, State.LIQUIDATED, State.ENTRY_PENDING, State.EXIT_PENDING, State.FLAT]
+
+
+@pytest.mark.parametrize("state", STATES + [None])
+def test_missing_stop_is_raised_for_every_local_state(state):
+    loc = {} if state is None else {6: local(6, state, "1")}
+    ms = diff(local=loc, remote=remote([pv(6, "1")]), run_id="r", known_orders=set())
+    assert [m.kind for m in ms if m.instrument_id == 6].count("missing_stop") == 1
+
+
+@pytest.mark.parametrize("state", STATES)
+async def test_reconcile_restores_the_stop_from_the_exchange_entry_for_every_state(state):
+    conn, ex, router, pf = await make_open()
+    await ex.cancel_stop(6)                                   # the venue lost our stop
+    router.state = state
+    router._persist()
+    ms = await pf.reconcile_now()
+    assert "missing_stop" in [m.kind for m in ms]
+    entry = (await ex.snapshot()).position(6).entry_price
+    assert (await ex.snapshot()).stops == {6: stop_price(side="long", entry=entry)}
+
+
+async def test_reconcile_restores_the_stop_for_a_position_with_no_router():
+    conn, ex, router, pf = await make_open()
+    ex.update_mark(7, Decimal(50))
+    await ex.submit(OrderRequest(client_order_id="elsewhere", instrument_id=7, side="sell", quantity=Decimal(2),
+                                 reduce_only=False, ts=T0))
+    ex.drain_events()
+    await pf.reconcile_now()
+    entry7 = (await ex.snapshot()).position(7).entry_price
+    assert (await ex.snapshot()).stops[7] == stop_price(side="short", entry=entry7)
+    # Controller ruling F12: every stop reconciliation places is announced as INFO stop_placed.
+    assert [(a[1], a[4]["trigger"]) for a in list_alerts(conn, "r") if a[2] == "stop_placed" and a[3] == 7] == [
+        ("INFO", str(stop_price(side="short", entry=entry7)))]

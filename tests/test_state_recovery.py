@@ -9,6 +9,7 @@ from polyperps.execution.sim_executor import SimExecutor
 from polyperps.execution.state_recovery import RecoveryHalt, recover
 from polyperps.execution.types import FillUpdate, OrderRequest, OrderRow, PositionLocalRow, State
 from polyperps.monitor.alerts import Alerter, SqliteSink
+from polyperps.risk.liquidation_guard import stop_price
 from polyperps.storage.db import connect, get_order, list_alerts, list_recovery, upsert_order, upsert_position_local
 
 T0 = datetime(2026, 9, 12, 12, 0, tzinfo=timezone.utc)
@@ -66,6 +67,8 @@ async def test_unknown_remote_position_is_critical():
     rep = await recover(conn=conn, run_id="r", executor=ex, routers={6: router}, alerter=alerter, clock=lambda: T0)
     assert rep.unknown_positions == [8]
     assert any(a[1] == "CRITICAL" and a[2] == "unknown_position" for a in list_alerts(conn, "r"))
+    assert rep.stops_replaced == [8]
+    assert [a[3] for a in list_alerts(conn, "r") if a[1] == "INFO" and a[2] == "stop_placed"] == [8]   # F12
 
 
 async def test_halted_is_preserved():
@@ -176,3 +179,22 @@ async def test_adopting_position_over_pending_or_open_row_is_not_untracked():
                                                  cumulative_funding=Decimal(0), updated_at=T0))
     rep = await recover(conn=conn, run_id="r", executor=ex, routers={6: router}, alerter=alerter, clock=lambda: T0)
     assert rep.adopted_untracked == [] and not any(a[2] == "adopted_untracked" for a in list_alerts(conn, "r"))
+
+
+@pytest.mark.parametrize("state", [None, State.FLAT, State.ENTRY_PENDING, State.OPEN, State.EXIT_PENDING,
+                                   State.HALTED, State.LIQUIDATED])
+async def test_recovery_guards_every_venue_position_with_a_stop(state):
+    conn, ex, alerter, router = setup()
+    await ex.submit(OrderRequest(client_order_id="r-6-1", instrument_id=6, side="buy", quantity=Decimal(1),
+                                 reduce_only=False, ts=T0))
+    ex.drain_events()
+    if state is not None:
+        upsert_position_local(conn, PositionLocalRow(run_id="r", instrument_id=6, state=state, size=Decimal(0),
+                                                     entry_price=None, stop_trigger=None, stop_order_id=None,
+                                                     cumulative_funding=Decimal(0), updated_at=T0))
+    rep = await recover(conn=conn, run_id="r", executor=ex, routers={6: router}, alerter=alerter, clock=lambda: T0)
+    entry = (await ex.snapshot()).position(6).entry_price
+    assert (await ex.snapshot()).stops == {6: stop_price(side="long", entry=entry)} and rep.stops_replaced == [6]
+    assert router.size == 1 and router.stop_trigger == stop_price(side="long", entry=entry)
+    frozen = state in (State.HALTED, State.LIQUIDATED)
+    assert router.state is (state if frozen else State.OPEN)

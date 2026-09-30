@@ -1,4 +1,8 @@
-"""Spec 2.4b: rebuild router state from the executor (exchange = truth) before any strategy runs."""
+"""Spec 2.4b: rebuild router state from the executor (exchange = truth) before any strategy runs.
+
+Part A §4.2: every instrument is read, HALTED and LIQUIDATED rows included. Those two keep their
+state (a human clears them) but adopt the exchange size, and every venue position - ours, frozen
+or unknown - ends recovery with a venue stop."""
 
 from __future__ import annotations
 
@@ -9,10 +13,12 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from polyperps.execution.executor import Executor
-from polyperps.execution.order_router import InstrumentRouter
+from polyperps.execution.order_router import InstrumentRouter, place_exchange_stop
 from polyperps.execution.types import State
 from polyperps.monitor.alerts import Alert, Alerter
 from polyperps.storage import db
+
+_FROZEN = (State.HALTED, State.LIQUIDATED)
 
 
 class RecoveryHalt(RuntimeError):
@@ -64,12 +70,10 @@ async def recover(
             row = local.get(iid)
             if row is not None:
                 router.load_local(row)
-            if row is not None and row.state is State.HALTED:
-                rep.states[iid] = State.HALTED.value
-                continue
+            frozen = row is not None and row.state in _FROZEN
             pos = snap.position(iid)
             if pos is not None and pos.size != 0:
-                if row is None or row.state is State.FLAT:
+                if not frozen and (row is None or row.state is State.FLAT):
                     # I8: we never recorded opening this. The exchange is truth, so adopt it under
                     # a fresh stop - but an operator must know the book moved without us.
                     rep.adopted_untracked.append(iid)
@@ -77,26 +81,35 @@ async def recover(
                                        detail={"instrument_id": str(iid), "size": str(pos.size),
                                                "entry": str(pos.entry_price)}, ts=clock()))
                 router.size, router.entry, router.cumulative_funding = pos.size, pos.entry_price, pos.cumulative_funding
-                router.state = State.OPEN
-                router._persist()
-                if iid not in snap.stops:
-                    await router.replace_stop()
-                    rep.stops_replaced.append(iid)
-                else:
+                if not frozen:
+                    router.state = State.OPEN
+                if iid in snap.stops:
                     router.stop_trigger = snap.stops[iid]
-                    router._persist()
+                else:
+                    router.stop_trigger = await place_exchange_stop(executor, pos, router.limits)
+                    rep.stops_replaced.append(iid)
+                    alerter.emit(Alert(level="INFO", kind="stop_placed", instrument_id=iid,
+                                       detail={"trigger": str(router.stop_trigger)}, ts=clock()))
             else:
                 router.size, router.entry, router.stop_trigger = Decimal(0), None, None
-                router.state = State.FLAT
-                router._persist()
+                if not frozen:
+                    router.state = State.FLAT
+            router._persist()
             rep.states[iid] = router.state.value
         current_iid = None
 
         for pos in snap.positions:
             if pos.size != 0 and pos.instrument_id not in routers:
+                current_iid = pos.instrument_id
                 rep.unknown_positions.append(pos.instrument_id)
                 alerter.emit(Alert(level="CRITICAL", kind="unknown_position", instrument_id=pos.instrument_id,
                                    detail={"size": str(pos.size)}, ts=clock()))
+                if pos.instrument_id not in snap.stops:
+                    trigger = await place_exchange_stop(executor, pos)
+                    rep.stops_replaced.append(pos.instrument_id)
+                    alerter.emit(Alert(level="INFO", kind="stop_placed", instrument_id=pos.instrument_id,
+                                       detail={"trigger": str(trigger)}, ts=clock()))
+        current_iid = None
 
         prefix = f"{run_id}-"
         for o in db.list_orders(conn, run_id):
