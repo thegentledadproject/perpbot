@@ -14,6 +14,7 @@ from typing import Literal, Protocol
 import httpx
 
 from polyperps.exchange.types import _require_aware
+from polyperps.security.key_management import SecretUnavailable, load_secret
 from polyperps.storage import db
 
 Level = Literal["INFO", "WARN", "CRITICAL"]
@@ -110,6 +111,16 @@ class Alerter:
                 sink.emit(self._run_id, alert)
             except Exception as exc:
                 _log.warning("alert sink %s failed: %s", type(sink).__name__, type(exc).__name__)
+
+
+def default_sinks(conn) -> list[Sink]:
+    """Journal + alerts table always; Telegram (CRITICAL only) when both secrets load."""
+    sinks: list[Sink] = [LogSink(), SqliteSink(conn)]
+    try:
+        sinks.append(TelegramSink(token=load_secret("TELEGRAM_BOT_TOKEN"), chat_id=load_secret("TELEGRAM_CHAT_ID")))
+    except SecretUnavailable:
+        _log.info("telegram sink not configured")
+    return sinks
 
 
 # --- pure threshold helpers ---------------------------------------------------

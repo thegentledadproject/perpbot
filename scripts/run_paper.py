@@ -29,9 +29,8 @@ from polyperps.execution.order_router import InstrumentRouter, Portfolio
 from polyperps.execution.sim_executor import SimExecutor
 from polyperps.execution.state_recovery import recover
 from polyperps.gates import ExecutionMode, live_orders_allowed
-from polyperps.monitor.alerts import Alerter, LogSink, SqliteSink, TelegramSink
+from polyperps.monitor.alerts import Alerter, default_sinks
 from polyperps.risk.kill_switch import evaluate as kill_evaluate
-from polyperps.security.key_management import SecretUnavailable, load_secret
 from polyperps.signal.sufficiency import BAR
 from polyperps.signal.validation_log import read_records
 from polyperps.storage import db
@@ -70,12 +69,7 @@ def _params(args) -> dict:
 
 
 def _alerter(run_id: str, conn) -> Alerter:
-    sinks = [LogSink(), SqliteSink(conn)]
-    try:
-        sinks.append(TelegramSink(token=load_secret("TELEGRAM_BOT_TOKEN"), chat_id=load_secret("TELEGRAM_CHAT_ID")))
-    except SecretUnavailable:
-        log.info("telegram sink not configured")
-    return Alerter(run_id, sinks)
+    return Alerter(run_id, default_sinks(conn))
 
 
 def seed_history(conn, builder: LiveBarBuilder, wanted: Mapping[int, int], *, now: datetime,
