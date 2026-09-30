@@ -192,8 +192,7 @@ async def test_shadow_refuses_every_write_and_sends_nothing():
         await ex.cancel("r-6-1")
     with pytest.raises(ShadowRefused):
         await ex.place_stop(6, Decimal(85))
-    with pytest.raises(ShadowRefused):
-        await ex.cancel_stop(6)
+    await ex.cancel_stop(6)                    # a no-op: shadow never placed a stop of ours (I2)
     await ex.heartbeat()                       # nothing to keep alive: shadow never has orders
     assert s.calls == []
 

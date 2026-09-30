@@ -8,11 +8,13 @@ from decimal import Decimal
 from polyperps.backtest.bars import Bar
 from polyperps.execution.executor import ExecutorTimeout, GateClosed, ShadowRefused
 from polyperps.execution.live_executor import ShadowExecutor
-from polyperps.execution.order_router import InstrumentRouter, Portfolio, apply_guards
+from polyperps.execution.order_router import InstrumentRouter, Portfolio, apply_guards, place_exchange_stop
 from polyperps.execution.sim_executor import SimExecutor
 from dataclasses import replace as dc_replace
 
-from polyperps.execution.types import AccountSnapshot, FillUpdate, Intent, OrderAck, OrderRequest, OrderUpdate, State
+from polyperps.execution.types import (
+    AccountSnapshot, FillUpdate, Intent, OrderAck, OrderRequest, OrderUpdate, PositionView, State,
+)
 from polyperps.exchange.types import SourceType
 from polyperps.monitor.alerts import Alerter, SqliteSink
 from polyperps.monitor.decision_trail import reconstruct
@@ -852,3 +854,59 @@ async def test_incomplete_bar_exits_to_flat_and_never_enters():
     assert router.state is State.FLAT and list_decisions(conn, "r", 6)[-1].note == "skip:data_gap"
     await pf.on_bar({6: [bar(0), gap, bar(2)]}, "run")                   # the next complete bar enters again
     assert router.state is State.ENTRY_PENDING
+
+
+# --- final review: frozen LIQUIDATED, shadow venue fills, zero entry, late order events ------------
+
+
+async def test_liquidation_fill_keeps_the_router_liquidated_and_never_re_enters():
+    """I1: a venue liquidation fill (no client id) flattens the size but only a human leaves LIQUIDATED."""
+    conn, ex, strat, router, pf = make(executor_cls=LiquidatingExecutor)
+    await pf.on_bar({6: [bar(0)]}, "run"); await pump(pf, ex)
+    await pf.on_fast({6: Decimal(100)})
+    assert router.state is State.LIQUIDATED
+    await pf.dispatch(FillUpdate(client_order_id="venue-555", instrument_id=6, side="sell", quantity=router.size,
+                                 price=Decimal(70), fee=Decimal(0), ts=T0))
+    assert router.state is State.LIQUIDATED and router.size == 0
+    assert get_positions_local(conn, "r")[6].state is State.LIQUIDATED
+    assert "stop_fired" not in kinds(conn)
+    await pf.on_bar({6: [bar(0), bar(1)]}, "run")
+    assert list_decisions(conn, "r", 6)[-1].note == "skip:LIQUIDATED" and get_order(conn, "r-6-2") is None
+
+
+async def test_shadow_venue_fills_open_then_flatten_without_crashing_the_pump():
+    """I2: in shadow a venue fill reaches replace_stop/cancel_stop; neither may escape handle_event."""
+    conn = connect(":memory:")
+    ex = ShadowExecutor(FlatAccount(), clock=lambda: T0)
+    alerter = Alerter("r", [SqliteSink(conn)])
+    router = InstrumentRouter(run_id="r", instrument_id=6, category="crypto", strategy=Strat(0), executor=ex,
+                              conn=conn, alerter=alerter, categories=CATS, clock=lambda: T0)
+    pf = Portfolio(run_id="r", executor=ex, conn=conn, alerter=alerter, routers={6: router})
+    await pf.dispatch(FillUpdate(client_order_id="venue-1", instrument_id=6, side="buy", quantity=Decimal(1),
+                                 price=Decimal(100), fee=Decimal(0), ts=T0))
+    row = get_positions_local(conn, "r")[6]
+    assert router.state is State.OPEN and row.size == 1 and row.stop_trigger is None and router.stop_trigger is None
+    assert "shadow_refused" in kinds(conn) and "stop_placed" not in kinds(conn)
+    await pf.dispatch(FillUpdate(client_order_id="venue-2", instrument_id=6, side="sell", quantity=Decimal(1),
+                                 price=Decimal(90), fee=Decimal(0), ts=T0))
+    row = get_positions_local(conn, "r")[6]
+    assert router.state is State.FLAT and row.state is State.FLAT and row.size == 0
+
+
+async def test_place_exchange_stop_refuses_a_zero_entry():
+    """M4: a 0 trigger protects nothing."""
+    conn, ex, strat, router, pf = make()
+    pos = PositionView(instrument_id=6, size=Decimal(1), entry_price=Decimal(0), notional=Decimal(0), leverage=3,
+                       liquidation_price=None, unrealised_pnl=Decimal(0), cumulative_funding=Decimal(0))
+    with pytest.raises(ValueError):
+        await place_exchange_stop(ex, pos)
+    assert (await ex.snapshot()).stops == {}
+
+
+async def test_late_order_event_does_not_downgrade_a_filled_row():
+    """M5: an 'open' order event arriving after the fill leaves the row filled."""
+    conn, ex, strat, router, pf = make()
+    await pf.on_bar({6: [bar(0)]}, "run"); await pump(pf, ex)
+    assert get_order(conn, "r-6-1").status == "filled"
+    await pf.dispatch(OrderUpdate(client_order_id="r-6-1", status="open", filled_quantity=Decimal(0), ts=T0))
+    assert get_order(conn, "r-6-1").status == "filled"

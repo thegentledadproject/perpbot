@@ -13,12 +13,10 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from polyperps.execution.executor import Executor
-from polyperps.execution.order_router import InstrumentRouter, place_exchange_stop
+from polyperps.execution.order_router import _FROZEN, InstrumentRouter, place_exchange_stop
 from polyperps.execution.types import State
 from polyperps.monitor.alerts import Alert, Alerter
 from polyperps.storage import db
-
-_FROZEN = (State.HALTED, State.LIQUIDATED)
 
 
 class RecoveryHalt(RuntimeError):

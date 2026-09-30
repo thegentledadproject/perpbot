@@ -1,9 +1,11 @@
 from dataclasses import replace as dc_replace
 from datetime import datetime, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
+from polyperps.execution.live_executor import ShadowExecutor
 from polyperps.execution.order_router import InstrumentRouter
 from polyperps.execution.sim_executor import SimExecutor
 from polyperps.execution.state_recovery import RecoveryHalt, recover
@@ -198,3 +200,26 @@ async def test_recovery_guards_every_venue_position_with_a_stop(state):
     assert router.size == 1 and router.stop_trigger == stop_price(side="long", entry=entry)
     frozen = state in (State.HALTED, State.LIQUIDATED)
     assert router.state is (state if frozen else State.OPEN)
+
+
+class ShadowPositionAccount:
+    """The real account as a shadow session sees it: one position on 6 and no stop order."""
+    async def fetch_portfolio(self):
+        p = SimpleNamespace(instrument_id=6, size=Decimal(1), entry_price=Decimal(100), position_value=Decimal(100),
+                            leverage=3, liquidation_price=Decimal(70), unrealized_pnl=Decimal(0),
+                            cumulative_funding=Decimal(0))
+        return SimpleNamespace(positions=(p,), margin=SimpleNamespace(total_account_value=Decimal(1000)),
+                               in_liquidation=False)
+
+    async def fetch_open_orders(self):
+        return ()
+
+
+async def test_shadow_recovery_refuses_to_start_on_an_unguarded_position():
+    """T5 / plan Decision 6: recovery would have to place a stop; shadow refuses, so recovery halts."""
+    conn, _, alerter, router = setup()
+    ex = ShadowExecutor(ShadowPositionAccount(), clock=lambda: T0)
+    router.executor = ex
+    with pytest.raises(RecoveryHalt):
+        await recover(conn=conn, run_id="r", executor=ex, routers={6: router}, alerter=alerter, clock=lambda: T0)
+    assert ("CRITICAL", "recovery_failed") in [(a[1], a[2]) for a in list_alerts(conn, "r")]

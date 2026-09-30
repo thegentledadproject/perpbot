@@ -182,3 +182,28 @@ async def test_reconcile_restores_the_stop_for_a_position_with_no_router():
     # Controller ruling F12: every stop reconciliation places is announced as INFO stop_placed.
     assert [(a[1], a[4]["trigger"]) for a in list_alerts(conn, "r") if a[2] == "stop_placed" and a[3] == 7] == [
         ("INFO", str(stop_price(side="short", entry=entry7)))]
+
+
+class UnguardedPositionAccount(AlienOrderAccount):
+    """A real account holding a position on 6 with no stop order."""
+    async def fetch_portfolio(self):
+        p = SimpleNamespace(instrument_id=6, size=Decimal(1), entry_price=Decimal(100), position_value=Decimal(100),
+                            leverage=3, liquidation_price=Decimal(70), unrealized_pnl=Decimal(0),
+                            cumulative_funding=Decimal(0))
+        return SimpleNamespace(positions=(p,), margin=SimpleNamespace(total_account_value=Decimal(1000)),
+                               in_liquidation=False)
+
+    async def fetch_open_orders(self):
+        return ()
+
+
+async def test_reconcile_in_shadow_records_a_refused_missing_stop():
+    """T5: shadow cannot place the missing stop; it records shadow_refused and never claims stop_placed."""
+    conn = connect(":memory:")
+    ex = ShadowExecutor(UnguardedPositionAccount(), clock=lambda: T0)
+    alerter = Alerter("r", [SqliteSink(conn)])
+    pf = Portfolio(run_id="r", executor=ex, conn=conn, alerter=alerter, routers={})
+    ms = await pf.reconcile_now()
+    assert "missing_stop" in [m.kind for m in ms]
+    alerts = [(a[1], a[2]) for a in list_alerts(conn, "r")]
+    assert ("WARN", "shadow_refused") in alerts and "stop_placed" not in [k for _, k in alerts]

@@ -266,8 +266,8 @@ class LiveExecutor(LiveReader):
 
 class ShadowExecutor(LiveReader):
     """Part A §3.3: the real account, read-only. Every write raises ShadowRefused (the router
-    records the order as shadow_refused and halts the instrument); heartbeat is a no-op because
-    shadow never has an order to protect."""
+    records the order as shadow_refused and halts the instrument); heartbeat and cancel_stop are
+    no-ops because shadow never has an order or stop of its own to protect or cancel."""
 
     name = "shadow"
 
@@ -281,7 +281,7 @@ class ShadowExecutor(LiveReader):
         raise ShadowRefused(f"shadow: stop for {instrument_id} at {trigger_price} refused")
 
     async def cancel_stop(self, instrument_id: int) -> None:
-        raise ShadowRefused(f"shadow: cancel stop for {instrument_id} refused")
+        return None   # shadow never placed a stop of ours, so there is nothing of ours to cancel
 
     async def heartbeat(self) -> None:
         return None
