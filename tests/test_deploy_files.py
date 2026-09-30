@@ -99,3 +99,11 @@ def test_deploy_scripts_know_the_dashboard_unit():
         assert "polyperps-dashboard" in (DEPLOY_DIR / name).read_text(encoding="utf-8")
     assert "polyperps-dashboard" in (DEPLOY_DIR / "deploy.ps1").read_text(encoding="utf-8")
     assert "POLYPERPS_DASHBOARD_BIND=0.0.0.0:80" in (DEPLOY_DIR / "env.example").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("name", ["polyperps-feed.service", "polyperps-paper.service"])
+def test_long_running_units_are_supervised_by_systemd(name):
+    # The scripts no longer restart themselves; systemd must, even after a clean exit.
+    text = _read(name)
+    assert "Restart=always" in text
+    assert "RestartMaxDelaySec=" in text

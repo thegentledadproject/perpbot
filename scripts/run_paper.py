@@ -40,8 +40,6 @@ from polyperps.strategies import GRIDS, build_strategy
 log = logging.getLogger("polyperps.paper")
 HEARTBEAT_S = 20
 RECONCILE_S = 60
-INITIAL_BACKOFF_S = 1.0
-MAX_BACKOFF_S = 60.0
 _HOUR = timedelta(hours=1)
 _SEED_WINDOW_FACTOR = 2   # scan 2x the wanted hours so gaps in stored candles still yield N complete bars
 
@@ -112,12 +110,27 @@ def _recover_strategies(routers: Mapping[int, InstrumentRouter]) -> None:
             hook(1 if router.size > 0 else -1)
 
 
+async def run_until_first_exits(*coros) -> None:
+    """Run every coroutine; the first to finish, by returning or raising, ends the rest. Its
+    exception propagates, so a dead background loop takes the process down (systemd restarts
+    it and counts it) instead of the bot running on without that loop."""
+    tasks = [asyncio.ensure_future(c) for c in coros]
+    try:
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for t in done:
+            t.result()
+    finally:
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 async def run_once(args, settings) -> None:
     if args.hypothesis == "h2":
         raise SystemExit("h2 needs a live proxy feed; not wired in Phase 2a")
     settings.db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = db.connect(settings.db_path)
-    run_id = args.run_id   # minted once in main(); a supervised restart must reopen the same paper account
+    run_id = args.run_id   # minted once in main(); systemd passes --run-id so every restart reopens the same paper account
     alerter = _alerter(run_id, conn)
     fee = db.latest_fee(conn, args.fee_category)
     if fee is None:
@@ -200,17 +213,14 @@ async def run_once(args, settings) -> None:
                 break
             await pf.reconcile_now()
 
-    tasks = [asyncio.create_task(t()) for t in (bar_loop, fast_loop, reconcile_loop, pf.run_event_pump)]
     try:
-        await feed.run()
+        await run_until_first_exits(feed.run(), bar_loop(), fast_loop(), reconcile_loop(), pf.run_event_pump())
+        log.warning("paper run ended; exiting so systemd restarts it")
     finally:
         stop.set()
         # Deliberately not flushing builder.close_all() here: the currently-open hour is
         # partial, and close_all() stamps whatever it has as complete=True. Dropping it
         # is correct - it picks back up on the next tick after restart.
-        for t in tasks:
-            t.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
         with contextlib.suppress(Exception):
             await ticks.aclose()
         await client.close()
@@ -228,23 +238,7 @@ def main() -> None:
         raise SystemExit(2)
     args.run_id = args.run_id or f"paper-{datetime.now(timezone.utc):%Y%m%dT%H%M%S%f}"
     log.info("run_id %s", args.run_id)
-    asyncio.run(_supervise(args, settings))
-
-
-async def _supervise(args, settings) -> None:
-    backoff = INITIAL_BACKOFF_S
-    while True:
-        started = asyncio.get_running_loop().time()
-        try:
-            await run_once(args, settings)
-            log.warning("feed ended; restarting")
-        except (KeyboardInterrupt, asyncio.CancelledError, SystemExit):
-            raise
-        except Exception:
-            log.exception("paper run crashed; restarting in %.0fs", backoff)
-        ran = asyncio.get_running_loop().time() - started
-        backoff = INITIAL_BACKOFF_S if ran > 300 else min(backoff * 2, MAX_BACKOFF_S)
-        await asyncio.sleep(backoff)
+    asyncio.run(run_once(args, settings))
 
 
 def _raise_keyboard_interrupt(signum, frame):

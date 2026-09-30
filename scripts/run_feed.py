@@ -126,23 +126,10 @@ async def main() -> None:
     if "--list-instruments" in sys.argv:
         await list_instruments()
         return
-    settings = load_settings()
-    backoff = 1.0
-    while True:
-        started = asyncio.get_running_loop().time()
-        try:
-            await run_once(settings)
-            log.warning("feed stream ended cleanly; restarting")
-        except (KeyboardInterrupt, asyncio.CancelledError, SystemExit):
-            # SystemExit is a BaseException already (not caught by `except Exception`
-            # below); listed explicitly so an unknown-instrument-id abort from
-            # run_once() is never mistaken for a transient crash and retried.
-            raise
-        except Exception:
-            log.exception("feed crashed; restarting in %.0fs", backoff)
-        ran_for = asyncio.get_running_loop().time() - started
-        backoff = 1.0 if ran_for > 300 else min(backoff * 2, 60.0)
-        await asyncio.sleep(backoff)
+    # No in-process restart loop: systemd (Restart=always) restarts the process, so a crash
+    # shows in NRestarts and the health check instead of hiding inside an "active" unit.
+    await run_once(load_settings())
+    log.warning("feed stream ended; exiting so systemd restarts it")
 
 
 def _raise_keyboard_interrupt(signum, frame):
