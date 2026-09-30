@@ -95,10 +95,11 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     settings = load_settings()
     now = datetime.now(timezone.utc)
-    conn = db.connect(settings.db_path)
-    alerter = Alerter(RUN_ID, default_sinks(conn))
+    conn = None
     state_path = settings.db_path.parent / "health-state.json"
     try:
+        conn = db.connect(settings.db_path)
+        alerter = Alerter(RUN_ID, default_sinks(conn))
         usage = shutil.disk_usage(settings.db_path.parent)
         alerts, state = evaluate(
             now=now,
@@ -115,11 +116,12 @@ def main() -> None:
         state_path.write_text(json.dumps(state), encoding="utf-8")
         log.info("health: %d alert(s), open=%s", len(alerts), state["open"])
     except Exception as exc:
-        alerter.emit(Alert(level="CRITICAL", kind="healthcheck_error", instrument_id=None,
-                           detail={"error": repr(exc)}, ts=now))
+        Alerter(RUN_ID, default_sinks(conn)).emit(   # conn None (DB won't open): journal + Telegram only
+            Alert(level="CRITICAL", kind="healthcheck_error", instrument_id=None, detail={"error": repr(exc)}, ts=now))
         raise
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 if __name__ == "__main__":

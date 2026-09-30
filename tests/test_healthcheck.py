@@ -90,3 +90,18 @@ def test_disk_pct_matches_df_not_total():
     from types import SimpleNamespace
     pct = load().disk_used_pct(SimpleNamespace(total=100, used=90, free=5))   # 5 blocks are root-reserved
     assert round(pct, 1) == 94.7
+
+
+def test_unopenable_db_still_alerts(monkeypatch):
+    import pytest
+    from types import SimpleNamespace
+    from pathlib import Path
+    mod = load()
+    sent = []
+    sink = SimpleNamespace(emit=lambda run_id, alert: sent.append(alert))
+    monkeypatch.setattr(mod, "load_settings", lambda: SimpleNamespace(db_path=Path("x/y.db"), instrument_ids=[]))
+    monkeypatch.setattr(mod.db, "connect", lambda p: (_ for _ in ()).throw(OSError("disk I/O error")))
+    monkeypatch.setattr(mod, "default_sinks", lambda conn=None: [sink])
+    with pytest.raises(OSError):
+        mod.main()
+    assert [(a.level, a.kind) for a in sent] == [("CRITICAL", "healthcheck_error")]

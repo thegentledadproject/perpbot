@@ -3,6 +3,7 @@ Description=polyperps ops health check (disk, tick freshness, unit restarts, pru
 
 [Service]
 Type=oneshot
+TimeoutStartSec=3min
 User=polyperps
 Group=polyperps
 WorkingDirectory=/opt/polyperps

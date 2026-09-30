@@ -9,15 +9,14 @@ Runs until Ctrl-C. WS ticks (mark/index/last/funding) go through the
 sanity filter into `ticks`; rejections into `rejections`; a REST book
 snapshot per instrument every POLYPERPS_BOOK_INTERVAL_S into
 `book_snapshots`. A health line is logged every POLYPERPS_HEALTH_LOG_S.
-The SDK reconnects the WS internally; if the stream ends anyway, this
-loop restarts it with backoff so a 48h soak survives transient failures.
+The SDK reconnects the WS internally; if the stream ends anyway, the process
+exits and systemd (Restart=always) restarts it.
 
 Before subscribing, run_once() validates every id in
 POLYPERPS_INSTRUMENT_IDS against fetch_instruments() and logs the
 resolved id -> symbol map at INFO; an unknown id logs an error and exits
 via SystemExit(2) rather than silently subscribing to nothing useful for
-48 hours. SystemExit is a BaseException, so main()'s restart loop does
-not treat it as a transient crash to retry.
+48 hours. systemd restarts the process on any exit.
 """
 
 from __future__ import annotations

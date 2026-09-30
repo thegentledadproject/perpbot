@@ -105,7 +105,7 @@ exit, gross exposure 1.0x / cluster net 0.6x equity, kill-switch thresholds `Non
 | Telegram CRITICAL alerts (optional) | put TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID files in /etc/credstore/ (root:root 0600) |
 
 `--run-id` is required for a soak: it names the paper account and the rows recovery
-reads, so a restart (manual or the built-in supervisor) reopens the same book. Without
+reads, so a restart (manual or systemd) reopens the same book. Without
 it a fresh id is minted per process start. Strategy warm-up is seeded from stored 1h
 candles at start (`seeded N bars for instrument I` in the log); until the history is
 long enough the router writes `skip:warmup` decisions and sends nothing.
@@ -156,7 +156,8 @@ tails the last 40 lines of both units after every deploy.
 **Health check**: `polyperps-health.timer` runs `scripts/healthcheck.py` every 5 minutes
 (and right after any failed prune). It alerts CRITICAL, once per problem, on: disk ≥95 %,
 newest tick older than 5 minutes, feed/paper not active or restarted by systemd, or a
-failed prune; and INFO when the problem clears. Alerts go to the journal
+failed prune; and INFO when the problem clears ("recovered" notices go to the journal and
+alerts table only; Telegram is CRITICAL-only). Alerts go to the journal
 (`journalctl -u polyperps-health`), the `alerts` table (run_id `ops-health`) and Telegram
 when configured. Without Telegram, nobody is paged.
 

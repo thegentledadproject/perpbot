@@ -69,7 +69,7 @@ fi
 
 echo "== systemd units =="
 # Gate the copy on content so a re-run of bootstrap.sh doesn't clobber an
-# operator's uncommented LoadCredential= lines in the installed paper unit.
+# operator's local edits to the installed units.
 for unit in polyperps-feed.service polyperps-paper.service polyperps-dashboard.service polyperps-prune.service polyperps-prune.timer polyperps-health.service polyperps-health.timer; do
   if ! cmp -s "/opt/polyperps/deploy/${unit}" "/etc/systemd/system/${unit}"; then
     cp "/opt/polyperps/deploy/${unit}" "/etc/systemd/system/${unit}"
@@ -78,7 +78,7 @@ for unit in polyperps-feed.service polyperps-paper.service polyperps-dashboard.s
 done
 systemctl enable polyperps-feed polyperps-paper polyperps-dashboard
 systemctl enable --now polyperps-prune.timer
-systemctl enable --now polyperps-health.timer
+systemctl enable polyperps-health.timer   # started with the services in step 4
 
 cat <<'EOF'
 
@@ -92,7 +92,7 @@ cat <<'EOF'
      cd /opt/polyperps && sudo -u polyperps env $(grep -v '^#' /etc/polyperps/env | xargs)        .venv/bin/python scripts/store_fees.py
      cd /opt/polyperps && sudo -u polyperps env $(grep -v '^#' /etc/polyperps/env | xargs)        .venv/bin/python scripts/backfill.py --days 31 --interval 1h
 4. Start the services:
-     systemctl start polyperps-feed polyperps-paper polyperps-dashboard
+     systemctl start polyperps-feed polyperps-paper polyperps-dashboard polyperps-health.timer
 5. Watch them:
      journalctl -fu polyperps-feed
      journalctl -fu polyperps-paper

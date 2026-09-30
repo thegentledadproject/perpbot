@@ -17,7 +17,8 @@ SHELL_FILES = ["bootstrap.sh", "update.sh"]
 
 # All deploy files must be plain LF text, deploy.ps1 included - PowerShell
 # 5.1 does not require CRLF, and the repo standardizes on LF everywhere.
-LF_ONLY_FILES = UNIT_FILES + ["env.example"] + SHELL_FILES + ["deploy.ps1", "polyperps-health.service", "polyperps-health.timer"]
+LF_ONLY_FILES = UNIT_FILES + ["env.example"] + SHELL_FILES + ["deploy.ps1", "polyperps-health.service", "polyperps-health.timer",
+                                                                              "polyperps-prune.service", "polyperps-prune.timer"]
 
 LIVE_EXECUTOR_RE = re.compile(r"--executor\s+live")
 
@@ -107,6 +108,7 @@ def test_long_running_units_are_supervised_by_systemd(name):
     text = _read(name)
     assert "Restart=always" in text
     assert "RestartMaxDelaySec=" in text
+
 
 def test_health_check_is_wired():
     health = _read("polyperps-health.service")

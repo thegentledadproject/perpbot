@@ -38,8 +38,8 @@ for unit in polyperps-feed.service polyperps-paper.service polyperps-dashboard.s
 done
 
 systemctl enable --now polyperps-prune.timer
-systemctl enable --now polyperps-health.timer
 systemctl restart polyperps-feed polyperps-paper polyperps-dashboard
+systemctl enable --now polyperps-health.timer   # after the restart, or it pages a false unit_down
 
 systemctl --no-pager status polyperps-feed polyperps-paper polyperps-dashboard || true
 

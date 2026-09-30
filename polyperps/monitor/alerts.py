@@ -113,9 +113,9 @@ class Alerter:
                 _log.warning("alert sink %s failed: %s", type(sink).__name__, type(exc).__name__)
 
 
-def default_sinks(conn) -> list[Sink]:
-    """Journal + alerts table always; Telegram (CRITICAL only) when both secrets load."""
-    sinks: list[Sink] = [LogSink(), SqliteSink(conn)]
+def default_sinks(conn=None) -> list[Sink]:
+    """Journal + alerts table (when conn given) always; Telegram (CRITICAL only) when both secrets load."""
+    sinks: list[Sink] = [LogSink()] if conn is None else [LogSink(), SqliteSink(conn)]
     try:
         sinks.append(TelegramSink(token=load_secret("TELEGRAM_BOT_TOKEN"), chat_id=load_secret("TELEGRAM_CHAT_ID")))
     except SecretUnavailable:

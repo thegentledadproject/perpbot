@@ -1,9 +1,9 @@
 """Secret resolution. Nothing here ever logs, reprs, or raises a secret value.
 
 Resolution order:
-  1. $CREDENTIALS_DIRECTORY/<name>   - systemd LoadCredential= (EC2 target).
-     Put secrets in /etc/credstore/<name> (root:root 0600) and add
-     LoadCredential=<name>:/etc/credstore/<name> to the unit. They never
+  1. $CREDENTIALS_DIRECTORY/<name>   - systemd credentials (EC2 target).
+     Put secrets in /etc/credstore/<name> (root:root 0600); units with
+     ImportCredential=<name> import them automatically. They never
      appear in the unit file, the environment, or `systemctl show`.
   2. OS keyring (service "polyperps")  - developer workstations.
   3. Environment variable               - ONLY if POLYPERPS_ALLOW_ENV_SECRETS=1.
