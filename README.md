@@ -90,6 +90,23 @@ Since the 2026-09-12 amendment (spec §8.3) `passed` also requires zero hourly-o
 fallback fills on the holdout and a backtested span of at least 60 days, and the
 gate re-checks those from the record rather than trusting the flag.
 
+### Re-run the screens under harness_version 2 (operator step)
+
+The gate accepts only records from the current harness, so the h1/h3 screens must be re-run.
+Locally:
+
+    POLYPERPS_INSTRUMENT_IDS=6 .venv/Scripts/python scripts/run_backtest.py --hypothesis h1 --instrument 6 --source hyperliquid --fee-category equity
+    POLYPERPS_INSTRUMENT_IDS=6 .venv/Scripts/python scripts/run_backtest.py --hypothesis h3 --instrument 6 --source hyperliquid --fee-category equity
+
+On the box (its sudo rejects `-E`, so pass the environment through systemd-run):
+
+    sudo systemd-run --wait --pipe -p User=polyperps -p EnvironmentFile=/etc/polyperps/env -p WorkingDirectory=/opt/polyperps /opt/polyperps/.venv/bin/python scripts/run_backtest.py --hypothesis h1 --instrument 6 --source hyperliquid --fee-category equity --log-path /var/lib/polyperps/screens-v2.jsonl
+
+and the same with `--hypothesis h3`; then copy the new lines of
+`/var/lib/polyperps/screens-v2.jsonl` into `polyperps/signal/validation_log.jsonl` and commit.
+h3 reads stored ticks (`index_close`) and tick retention is 3 days, so an h3 screen longer than
+that trades nothing until a tick rollup exists.
+
 ## Phase 2a — paper execution (no live orders)
 
 Specs: `docs/superpowers/specs/2026-09-12-polyperps-phase2a-design.md`,
@@ -109,7 +126,8 @@ kill-switch divergence thresholds `None`.
 
 `--run-id` is required for a soak: it names the account rows recovery reads, so a restart
 (manual or systemd) reopens the same book. Without it a fresh id is minted per process
-start. Strategy warm-up is seeded from stored 1h candles at start (`seeded N bars for
+start (sim only: shadow and live exit 2 without `--run-id`, and refuse a run_id whose rows
+another executor wrote, e.g. a sim soak's). Strategy warm-up is seeded from stored 1h candles at start (`seeded N bars for
 instrument I` in the log); until the history is long enough the router writes
 `skip:warmup` decisions and sends nothing.
 

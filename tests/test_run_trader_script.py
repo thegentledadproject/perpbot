@@ -17,7 +17,7 @@ from polyperps.execution.types import AccountSnapshot, State
 from polyperps.monitor.alerts import Alerter, SqliteSink
 from polyperps.storage.db import (
     connect, get_positions_local, insert_candle, insert_fee, insert_funding, list_alerts, list_decisions,
-    load_account_snapshot, save_account_snapshot,
+    load_account_snapshot, save_account_snapshot, save_sim_account,
 )
 
 T0 = datetime(2026, 9, 12, 0, 0, tzinfo=timezone.utc)
@@ -122,6 +122,53 @@ async def test_build_executor_keeps_the_loss_baseline_across_restarts():
     shadow = await mod.build_executor("shadow", run_id="t", conn=conn, fee_rate=Decimal("0.0004"),
                                       equity=Decimal(1000), instrument_ids=[6], session=FakeAccount("910"))
     assert shadow.start_equity == Decimal(1000)
+
+
+@pytest.mark.parametrize("owner", ["sim-snapshot", "sim-account", "live"])
+async def test_build_executor_refuses_a_run_id_owned_by_another_executor(owner, capsys):
+    """M1: shadow must not adopt a sim (or live) run's rows, baseline or halts."""
+    mod = load()
+    conn = connect(":memory:")
+    if owner == "sim-account":
+        save_sim_account(conn, "t", "{}")
+    else:
+        save_account_snapshot(conn, "t", AccountSnapshot(equity=Decimal(1000), positions=(), open_orders=(), stops={},
+                                                         in_liquidation=False, ts=T0),
+                              start_equity=Decimal(1000), executor=owner.split("-")[0])
+    with pytest.raises(SystemExit) as e:
+        await mod.build_executor("shadow", run_id="t", conn=conn, fee_rate=Decimal("0.0004"), equity=Decimal(1000),
+                                 instrument_ids=[6], session=FakeAccount())
+    assert e.value.code == 2 and "run_id 't'" in capsys.readouterr().err
+
+
+async def test_build_executor_saves_the_first_baseline_at_once():
+    """M2: a crash before the first fast-loop tick must not let the next start re-baseline."""
+    mod = load()
+    conn = connect(":memory:")
+    await mod.build_executor("shadow", run_id="t", conn=conn, fee_rate=Decimal("0.0004"), equity=Decimal(1000),
+                             instrument_ids=[6], session=FakeAccount("1234"))
+    snap, start_equity, executor = load_account_snapshot(conn, "t")
+    assert start_equity == Decimal(1234) and executor == "shadow"
+    again = await mod.build_executor("shadow", run_id="t", conn=conn, fee_rate=Decimal("0.0004"),
+                                     equity=Decimal(1000), instrument_ids=[6], session=FakeAccount("1100"))
+    assert again.start_equity == Decimal(1234)
+
+
+@pytest.mark.parametrize("mode", ["shadow", "live"])
+def test_shadow_and_live_need_an_explicit_run_id(mode, monkeypatch, tmp_path, capsys):
+    """M3: a minted run_id would restart as a fresh account (new baseline, no recovery rows)."""
+    monkeypatch.setenv("POLYPERPS_INSTRUMENT_IDS", "6")
+    monkeypatch.setenv("POLYPERPS_DB_PATH", str(tmp_path / "t.sqlite3"))
+    monkeypatch.setattr(sys, "argv", ["run_trader.py", "--executor", mode, "--hypothesis", "h1"])
+    mod = load()
+
+    async def no_run(args, settings):
+        raise AssertionError("must exit before running")
+
+    monkeypatch.setattr(mod, "run_once", no_run)
+    with pytest.raises(SystemExit) as e:
+        mod.main()
+    assert e.value.code == 2 and "--run-id" in capsys.readouterr().err
 
 
 def test_main_runs_once_and_lets_a_crash_exit(monkeypatch, tmp_path):

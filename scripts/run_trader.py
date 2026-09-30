@@ -9,6 +9,8 @@ shadow  the real account, read-only: decisions run, every would-be order is reco
         Refuses to start (RecoveryHalt) while the account holds a position without a stop or
         an open order this run did not place - recovery would have to write to fix those.
 live    LiveExecutor. Exits 2 unless all three locks are open (they are not in Part A).
+
+shadow and live need an explicit --run-id and refuse (exit 2) a run_id another executor wrote.
 """
 
 from __future__ import annotations
@@ -97,8 +99,20 @@ async def build_executor(mode: str, *, run_id: str, conn, fee_rate: Decimal, equ
     ex = (ShadowExecutor(session) if mode == "shadow"
           else LiveExecutor(session, instrument_ids=instrument_ids, modes=MODES))
     prev = db.load_account_snapshot(conn, run_id)
+    owner = prev[2] if prev is not None else ("sim" if db.load_sim_account(conn, run_id) else None)
+    if owner is not None and owner != ex.name:
+        # Its rows, baseline and halts belong to another account; adopting them would be wrong.
+        print(f"--executor {mode} refused: run_id {run_id!r} already belongs to the {owner} executor; "
+              f"pick a new --run-id", file=sys.stderr)
+        raise SystemExit(2)
     # The loss-limit baseline must survive restarts, or a restart after -9 % would reset it.
-    ex.start_equity = prev[1] if prev is not None else (await ex.snapshot()).equity
+    if prev is not None:
+        ex.start_equity = prev[1]
+    else:
+        snap = await ex.snapshot()
+        ex.start_equity = snap.equity
+        # Saved now, not at the first fast-loop tick, so a crash inside HEARTBEAT_S can't re-baseline.
+        db.save_account_snapshot(conn, run_id, snap, start_equity=ex.start_equity, executor=ex.name)
     return ex
 
 
@@ -272,6 +286,10 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     args = build_parser().parse_args()
     settings = load_settings()
+    if args.executor != "sim" and not args.run_id:
+        # A minted id would make every systemd restart a fresh account: new baseline, nothing to recover.
+        print(f"--executor {args.executor} needs an explicit --run-id", file=sys.stderr)
+        raise SystemExit(2)
     if args.executor == "live":
         # Checked before the wallet key is loaded; LiveExecutor's constructor checks again.
         closed = [d.reason for i in settings.instrument_ids
