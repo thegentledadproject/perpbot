@@ -132,7 +132,7 @@ class InstrumentRouter:
             return
         if len(history) < getattr(self.strategy, "warmup", 0):
             # Same rule as the backtest harness: no target call until the strategy has its
-            # lookback. run_paper seeds history from stored candles so this is normally brief.
+            # lookback. run_trader seeds history from stored candles so this is normally brief.
             self._record(target=None, verdicts={}, intent=None, cid=None, note="skip:warmup")
             return
         target = clamp_target(self.strategy.target(history))
@@ -416,7 +416,7 @@ class Portfolio:
                 mark = router.entry or Decimal(0)
             await router.shutdown(mark, pos.size if pos is not None else Decimal(0))
 
-    async def on_fast(self, marks: Mapping[int, Decimal]) -> None:
+    async def on_fast(self, marks: Mapping[int, Decimal]) -> AccountSnapshot:
         async with self._lock:
             snapshot = await self.executor.snapshot()
             for iid, mark in marks.items():
@@ -432,6 +432,7 @@ class Portfolio:
                 self._last_pnl_level = level
             # funding_drift_alert would go here (realised vs expected funding per instrument);
             # deferred to Phase 2b - the sim's funding is the predicted rate, so it can never drift.
+            return snapshot
 
     async def dispatch(self, ev: OrderUpdate | FillUpdate | ReconcileNow) -> None:
         async with self._lock:

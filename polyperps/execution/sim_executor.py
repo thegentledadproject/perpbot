@@ -169,7 +169,7 @@ class SimExecutor:
         """Fire stops against current marks. Callable with the router stopped.
 
         The account mutates synchronously; the resulting fills are RETURNED, never queued
-        on events(). The caller (run_paper's fast loop) dispatches them itself, in the same
+        on events(). The caller (run_trader's fast loop, via poll_fills) dispatches them itself, in the same
         task and before anything else can observe the account - otherwise a reconcile could
         run between the mutation and the pump's delivery and halt on a phantom size mismatch."""
         fired: list[FillUpdate] = []

@@ -92,27 +92,29 @@ gate re-checks those from the record rather than trusting the flag.
 
 ## Phase 2a — paper execution (no live orders)
 
-Spec: `docs/superpowers/specs/2026-09-12-polyperps-phase2a-design.md`. The router,
-guards, reconciliation, recovery, and alerts run on the exact path a live run
-would, with `SimExecutor` as the last mile. Pre-registered limits: 3x leverage,
-25 % liquidation-distance floor, 15 % exchange-side stop, 2 % funding-cost
-exit, gross exposure 1.0x / cluster net 0.6x equity, kill-switch thresholds `None`.
+Specs: `docs/superpowers/specs/2026-09-12-polyperps-phase2a-design.md`,
+`docs/superpowers/specs/2026-09-30-polyperps-phase2b-parta-design.md`. One runner,
+`scripts/run_trader.py`, drives the router, guards, reconciliation, recovery and alerts in
+every mode; only the last mile changes. Pre-registered limits: 3x leverage, 25 %
+liquidation-distance floor, 15 % exchange-side stop, 2 % funding-cost exit, gross exposure
+1.0x / cluster net 0.6x equity, loss limit -5 % pause / -10 % flatten and halt,
+kill-switch divergence thresholds `None`.
 
 | Step | Command |
 |------|---------|
-| 48 h paper run | `POLYPERPS_INSTRUMENT_IDS=6,7 .venv/Scripts/python scripts/run_paper.py --executor sim --hypothesis h1 --run-id soak-2026-09-13` |
+| paper run (sim) | `POLYPERPS_INSTRUMENT_IDS=6,7 .venv/Scripts/python scripts/run_trader.py --executor sim --hypothesis h1 --run-id soak-2026-09-13` |
+| shadow run (real account, read-only; needs the wallet key) | same with `--executor shadow --run-id shadow-1` |
 | clear a halted (or liquidated) instrument (human decision) | add `--clear-halt 6` to the run command |
 | Telegram CRITICAL alerts (optional) | put TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID files in /etc/credstore/ (root:root 0600) |
 
-`--run-id` is required for a soak: it names the paper account and the rows recovery
-reads, so a restart (manual or systemd) reopens the same book. Without
-it a fresh id is minted per process start. Strategy warm-up is seeded from stored 1h
-candles at start (`seeded N bars for instrument I` in the log); until the history is
-long enough the router writes `skip:warmup` decisions and sends nothing.
+`--run-id` is required for a soak: it names the account rows recovery reads, so a restart
+(manual or systemd) reopens the same book. Without it a fresh id is minted per process
+start. Strategy warm-up is seeded from stored 1h candles at start (`seeded N bars for
+instrument I` in the log); until the history is long enough the router writes
+`skip:warmup` decisions and sends nothing.
 
-`--executor live` exits 2 in Phase 2a. `LiveExecutor` cannot be constructed
-unless all three locks are open; the kill switch refuses to `run` live while its
-thresholds are `None` (set in Phase 2b from a passing native record).
+`--executor live` exits 2 while any of the three locks is closed. `LiveExecutor` cannot be
+constructed unless all three are open, and re-checks them on every order.
 
 ## Deploy (EC2, systemd, PuTTY)
 

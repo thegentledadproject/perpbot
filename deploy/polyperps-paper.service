@@ -1,5 +1,5 @@
 [Unit]
-Description=polyperps paper execution (Phase 2a, SimExecutor only)
+Description=polyperps paper execution (run_trader.py, SimExecutor only)
 After=network-online.target
 Wants=network-online.target
 
@@ -13,7 +13,7 @@ EnvironmentFile=/etc/polyperps/env
 # Missing files are skipped, so nothing needs uncommenting.
 ImportCredential=TELEGRAM_BOT_TOKEN
 ImportCredential=TELEGRAM_CHAT_ID
-ExecStart=/opt/polyperps/.venv/bin/python scripts/run_paper.py --executor sim --hypothesis ${PAPER_HYPOTHESIS} --run-id ${PAPER_RUN_ID}
+ExecStart=/opt/polyperps/.venv/bin/python scripts/run_trader.py --executor sim --hypothesis ${PAPER_HYPOTHESIS} --run-id ${PAPER_RUN_ID}
 # The scripts do not restart themselves; systemd does, even after a clean exit
 # (stream ended). Backoff 10 s -> 120 s over 5 steps if it keeps crashing.
 Restart=always

@@ -320,7 +320,7 @@ async def test_stop_fire_with_concurrent_reconcile_does_not_halt():
     ex.update_mark(6, Decimal(80))
     mismatches = []
 
-    async def fast_step():                           # == scripts/run_paper.py fast_loop body
+    async def fast_step():                           # == scripts/run_trader.py fast_loop body
         for f in ex.check_triggers():
             await pf.dispatch(f)
         await pf.on_fast({6: Decimal(80)})
