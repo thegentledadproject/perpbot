@@ -84,3 +84,9 @@ def test_load_state_missing_or_corrupt_is_empty(tmp_path):
     bad = tmp_path / "bad.json"
     bad.write_text('{"open": [', encoding="utf-8")
     assert mod.load_state(bad) == {}
+
+
+def test_disk_pct_matches_df_not_total():
+    from types import SimpleNamespace
+    pct = load().disk_used_pct(SimpleNamespace(total=100, used=90, free=5))   # 5 blocks are root-reserved
+    assert round(pct, 1) == 94.7

@@ -81,6 +81,11 @@ def unit_props(unit: str) -> dict[str, str]:
     return dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
 
 
+def disk_used_pct(usage) -> float:
+    """Percent full the way df shows it: ext4 reserves ~5% for root, which the service user cannot use."""
+    return 100 * usage.used / (usage.used + usage.free)
+
+
 def last_tick(conn, instrument_id: int) -> datetime | None:
     (ts,) = conn.execute("SELECT MAX(exchange_ts) FROM ticks WHERE instrument_id=?", (instrument_id,)).fetchone()
     return None if ts is None else datetime.fromisoformat(ts)
@@ -97,7 +102,7 @@ def main() -> None:
         usage = shutil.disk_usage(settings.db_path.parent)
         alerts, state = evaluate(
             now=now,
-            disk_pct=100 * usage.used / usage.total,
+            disk_pct=disk_used_pct(usage),
             last_ticks={i: last_tick(conn, i) for i in settings.instrument_ids},
             units={u: unit_props(u) for u in UNITS},
             prune_result=unit_props(PRUNE).get("Result", ""),
