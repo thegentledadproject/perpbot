@@ -22,23 +22,29 @@ from polyperps.config import load_settings
 TABLES = ("ticks", "book_snapshots")
 
 
-def prune(conn: sqlite3.Connection, cutoff: datetime, batch: int = 50_000) -> dict[str, int]:
+def prune(conn: sqlite3.Connection, cutoff: datetime, batch: int = 5_000) -> dict[str, int]:
     """Delete rows with exchange_ts strictly before cutoff. Returns rows deleted per table.
 
     Batched with a checkpoint per batch: one big DELETE grew the WAL to the size of
-    everything deleted (650 MB) and filled the disk on 2026-09-28.
+    everything deleted (650 MB) and filled the disk on 2026-09-28. Per instrument so
+    each batch uses the (instrument_id, exchange_ts) index: a time-only filter scanned
+    all ticks under the write lock (~40 s) and crashed the feed/paper writers with
+    "database is locked" every hour on 2026-09-28..30.
     """
     iso = cutoff.isoformat()
     deleted = {}
     for table in TABLES:
         deleted[table] = 0
-        while n := conn.execute(
-            f"DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} WHERE exchange_ts < ? LIMIT ?)",  # noqa: S608 - table names are literals above
-            (iso, batch),
-        ).rowcount:
-            conn.commit()
-            conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-            deleted[table] += n
+        ids = [r[0] for r in conn.execute(f"SELECT DISTINCT instrument_id FROM {table}")]  # noqa: S608
+        for iid in ids:
+            while n := conn.execute(
+                f"DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} "  # noqa: S608 - table names are literals above
+                "WHERE instrument_id = ? AND exchange_ts < ? LIMIT ?)",
+                (iid, iso, batch),
+            ).rowcount:
+                conn.commit()
+                conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                deleted[table] += n
     conn.commit()
     return deleted
 
@@ -63,7 +69,7 @@ def main() -> None:
 
     db_path = str(load_settings().db_path)
     cutoff = datetime.now(timezone.utc) - timedelta(days=args.days)
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=30)
     try:
         deleted = prune(conn, cutoff)
         print(f"cutoff {cutoff.isoformat()}: " + ", ".join(f"{t} -{n}" for t, n in deleted.items()))
