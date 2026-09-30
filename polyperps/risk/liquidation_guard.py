@@ -99,6 +99,17 @@ def stop_price(*, side: Literal["long", "short"], entry: Decimal, limits: RiskLi
     return (entry * factor).quantize(Decimal("0.01"))
 
 
+def liquidation_price(size: Decimal, entry: Decimal, limits: RiskLimits = LIMITS) -> Decimal:
+    """Isolated-margin liquidation price at limits.max_leverage (a documented assumption; live uses
+    the exchange's own number). Shared by SimExecutor, the backtest guards and the dashboard."""
+    lev = Decimal(limits.max_leverage)
+    if size > 0:
+        liq = entry * (1 - Decimal(1) / lev + limits.maintenance_rate)
+    else:
+        liq = entry * (1 + Decimal(1) / lev - limits.maintenance_rate)
+    return liq.quantize(Decimal("0.01"))
+
+
 def funding_exit_due(position: PositionView, *, limits: RiskLimits = LIMITS) -> bool:
     paid = -position.cumulative_funding
     return paid >= limits.max_funding_cost * position.notional

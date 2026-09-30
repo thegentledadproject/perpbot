@@ -147,6 +147,13 @@ class InstrumentRouter:
         if kill == "shutdown":
             await self.shutdown(mark)
             return
+        if not history[-1].complete:
+            # Part A §6.4, the backtest's rule: a bar after missing data exits to flat and never enters.
+            if self.state is State.OPEN:
+                await self._exit(mark, "data_gap", target=None)
+            else:
+                self._record(target=None, verdicts={}, intent=None, cid=None, note="skip:data_gap")
+            return
         if len(history) < getattr(self.strategy, "warmup", 0):
             # Same rule as the backtest harness: no target call until the strategy has its
             # lookback. run_trader seeds history from stored candles so this is normally brief.

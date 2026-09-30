@@ -13,7 +13,7 @@ from typing import Any, Mapping, Protocol, Sequence
 from polyperps.execution.types import State
 from polyperps.gates import LIVE_ENV_VAR
 from polyperps.monitor.alerts import margin_alert
-from polyperps.risk.liquidation_guard import LIMITS
+from polyperps.risk.liquidation_guard import LIMITS, liquidation_price
 from polyperps.risk.portfolio_exposure import EXPOSURE, cluster_of
 from polyperps.signal import base as signal_base
 from polyperps.signal.sufficiency import BAR, NATIVE_SOURCES, check_dataset
@@ -25,7 +25,6 @@ class InstrumentInfo(Protocol):
     category: str
 
 
-_CENT = Decimal("0.01")
 _ZERO = Decimal(0)
 
 
@@ -47,13 +46,8 @@ def _iso(dt: datetime) -> str:
 
 
 def liq_price(size: Decimal, entry: Decimal) -> Decimal:
-    """Same formula SimExecutor.snapshot() uses (sim_executor.py), pinned by a test."""
-    lev = Decimal(LIMITS.max_leverage)
-    if size > 0:
-        liq = entry * (1 - Decimal(1) / lev + LIMITS.maintenance_rate)
-    else:
-        liq = entry * (1 + Decimal(1) / lev - LIMITS.maintenance_rate)
-    return liq.quantize(_CENT)
+    """The sim's formula, for snapshots that carry no venue liquidation price."""
+    return liquidation_price(size, entry)
 
 
 def _name(iid: int, instruments: Mapping[int, InstrumentInfo] | None) -> str:

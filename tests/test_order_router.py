@@ -129,8 +129,8 @@ async def test_entry_then_open_with_stop_and_rows():
     d = list_decisions(conn, "r", 6)[0]
     assert d.client_order_id == "r-6-1" and d.verdicts == {"vet_entry": "allow", "vet_exposure": "allow"}
     await pump(pf, ex)
-    assert router.state is State.OPEN and router.size == 1 and router.entry == Decimal("100.08")
-    assert router.stop_trigger == Decimal("85.07")           # 100.08 * 0.85 = 85.068 -> ROUND_HALF_EVEN -> 85.07
+    assert router.state is State.OPEN and router.size == 1 and router.entry == Decimal(100)
+    assert router.stop_trigger == Decimal("85.00")           # 100 * 0.85
     assert (await ex.snapshot()).stops == {6: router.stop_trigger}
     assert get_positions_local(conn, "r")[6].state is State.OPEN
     assert get_order(conn, "r-6-1").status == "filled"
@@ -146,9 +146,9 @@ async def test_reject_and_resize_from_exposure():
     assert list_decisions(conn, "r", 6)[0].verdicts["vet_exposure"].startswith("reject:")
     conn2, ex2, _, router2, pf2 = make()
     await ex2.submit(OrderRequest(client_order_id="pre", instrument_id=7, side="buy", quantity=Decimal("5.5"),
-                                  reduce_only=False, ts=T0)); ex2.drain_events()  # ~550 notional -> room ~50 -> qty ~0.5
+                                  reduce_only=False, ts=T0)); ex2.drain_events()  # 550 notional; its cost leaves equity 998.13 -> room 48.88 -> qty 0.48878
     await pf2.on_bar({6: [bar(0)]}, "run")
-    assert Decimal("0.49") < get_order(conn2, "r-6-1").quantity <= Decimal("0.5")
+    assert Decimal("0.48") < get_order(conn2, "r-6-1").quantity <= Decimal("0.5")
 
 
 async def test_exit_on_target_zero_and_flip():
@@ -212,7 +212,7 @@ async def test_rejected_ack_reverts_state():
 async def test_fast_loop_liq_distance_exit():
     conn, ex, strat, router, pf = make()
     await pf.on_bar({6: [bar(0)]}, "run"); await pump(pf, ex)
-    ex.update_mark(6, Decimal(90))     # liq ~68.74 -> distance 23.6% < 25%
+    ex.update_mark(6, Decimal(90))     # liq 68.67 -> distance 23.7% < 25%
     await pf.on_fast({6: Decimal(90)})
     assert router.state is State.EXIT_PENDING and get_order(conn, "r-6-2").reason == "liq_distance"
     assert "margin_ratio" in kinds(conn)
@@ -392,7 +392,7 @@ async def test_margin_alert_only_on_level_transitions():
     await pf.on_fast({6: Decimal(100)})
     margin = [a for a in list_alerts(conn, "r") if a[2] == "margin_ratio"]
     assert [a[1] for a in margin] == ["WARN"]
-    ex.update_mark(6, Decimal(93))          # (93 - 68.72) / 93 = 0.261: CRITICAL, but >= 0.25 so no flatten
+    ex.update_mark(6, Decimal(93))          # (93 - 68.67) / 93 = 0.262: CRITICAL, but >= 0.25 so no flatten
     await pf.on_fast({6: Decimal(93)})
     await pf.on_fast({6: Decimal(93)})
     margin = [a for a in list_alerts(conn, "r") if a[2] == "margin_ratio"]
@@ -435,12 +435,12 @@ async def test_pnl_alert_on_drawdown_level_transitions_only():
                                  reduce_only=False, ts=T0)); ex.drain_events()
     await pf.on_fast({6: Decimal(100)})
     assert kinds(conn) == []
-    ex.update_mark(6, Decimal(94))            # 999.6 - 60.8 = 938.8 -> -6.1 %
+    ex.update_mark(6, Decimal(94))            # 1000 - 5.65 cost - 60 = 934.35 -> -6.6 %
     await pf.on_fast({6: Decimal(94)})
     await pf.on_fast({6: Decimal(94)})
     pnl = [a for a in list_alerts(conn, "r") if a[2] == "pnl_drawdown"]
     assert [a[1] for a in pnl] == ["WARN"]
-    ex.update_mark(6, Decimal(90))            # -10.1 %
+    ex.update_mark(6, Decimal(90))            # 894.35 -> -10.6 %
     await pf.on_fast({6: Decimal(90)})
     await pf.on_fast({6: Decimal(90)})
     assert [a[1] for a in list_alerts(conn, "r") if a[2] == "pnl_drawdown"] == ["WARN", "CRITICAL"]
@@ -838,3 +838,17 @@ async def test_funding_drift_alerts_when_charged_funding_is_3x_the_bar_rate():
             assert "funding_drift" not in kinds(conn)                          # 1st sighting is a baseline; then 1x
     drift = [a for a in list_alerts(conn, "r") if a[2] == "funding_drift"]
     assert len(drift) == 1 and drift[0][1] == "WARN" and drift[0][3] == 6
+
+
+async def test_incomplete_bar_exits_to_flat_and_never_enters():
+    conn, ex, strat, router, pf = make()
+    await pf.on_bar({6: [bar(0)]}, "run"); await pump(pf, ex)
+    gap = dc_replace(bar(1), complete=False)
+    await pf.on_bar({6: [bar(0), gap]}, "run")
+    assert get_order(conn, "r-6-2").reason == "data_gap"
+    await pump(pf, ex)
+    assert router.state is State.FLAT
+    await pf.on_bar({6: [bar(0), gap, dc_replace(bar(2), complete=False)]}, "run")
+    assert router.state is State.FLAT and list_decisions(conn, "r", 6)[-1].note == "skip:data_gap"
+    await pf.on_bar({6: [bar(0), gap, bar(2)]}, "run")                   # the next complete bar enters again
+    assert router.state is State.ENTRY_PENDING

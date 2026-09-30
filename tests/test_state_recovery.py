@@ -55,8 +55,8 @@ async def test_crash_after_fill_rebuilds_open_and_replaces_stop():
                                                  entry_price=None, stop_trigger=None, stop_order_id=None,
                                                  cumulative_funding=Decimal(0), updated_at=T0))
     rep = await recover(conn=conn, run_id="r", executor=ex, routers={6: router}, alerter=alerter, clock=lambda: T0)
-    assert router.state is State.OPEN and router.size == 1 and router.entry == Decimal("100.08")
-    assert rep.stops_replaced == [6] and (await ex.snapshot()).stops == {6: Decimal("85.07")}
+    assert router.state is State.OPEN and router.size == 1 and router.entry == Decimal(100)
+    assert rep.stops_replaced == [6] and (await ex.snapshot()).stops == {6: Decimal("85.00")}
     assert rep.abandoned == ["r-6-1"]   # not resting on the venue; its fill is already in the position
 
 
@@ -156,7 +156,7 @@ async def test_adopting_untracked_position_warns_and_is_reported():
     assert list_recovery(conn, "r")[0][1]["adopted_untracked"] == [6]
     warn = [a for a in list_alerts(conn, "r") if a[2] == "adopted_untracked"]
     assert len(warn) == 1 and warn[0][1] == "WARN" and warn[0][3] == 6
-    assert warn[0][4] == {"instrument_id": "6", "size": "-2", "entry": "99.92"}
+    assert warn[0][4] == {"instrument_id": "6", "size": "-2", "entry": "100"}
 
 
 async def test_adopting_position_over_flat_local_row_also_warns():

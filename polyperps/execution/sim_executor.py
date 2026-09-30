@@ -1,7 +1,7 @@
-"""Paper executor (spec section 4.3): in-memory account, cost-model fills at the
-live mark, self-firing stops, JSON persistence so a restart exercises recovery.
-Liquidation price uses MAINTENANCE_RATE (a documented assumption; live uses the
-exchange's own number)."""
+"""Paper executor (spec section 4.3): in-memory account, fills at the live mark with the SAME cost
+model as the backtest (costs.fill_cost, Part A §6.3), self-firing stops, JSON persistence so a
+restart exercises recovery. Liquidation price uses liquidation_guard.liquidation_price (a
+documented assumption; live uses the exchange's own number)."""
 
 from __future__ import annotations
 
@@ -9,14 +9,15 @@ import asyncio
 import json
 from collections.abc import AsyncIterator, Callable
 from datetime import datetime, timezone
-from decimal import ROUND_HALF_EVEN, Decimal
+from decimal import Decimal
 from typing import TYPE_CHECKING, Literal
 
+from polyperps.backtest.costs import fill_cost
 from polyperps.execution.executor import ExecutorTimeout
 from polyperps.execution.types import (
     AccountSnapshot, FillUpdate, OrderAck, OrderRequest, OrderUpdate, PositionView, StopAck,
 )
-from polyperps.risk.liquidation_guard import LIMITS
+from polyperps.risk.liquidation_guard import LIMITS, liquidation_price
 from polyperps.signal.sufficiency import BAR
 
 if TYPE_CHECKING:
@@ -24,8 +25,6 @@ if TYPE_CHECKING:
     from polyperps.exchange.types import Tick
 
 MAINTENANCE_RATE = LIMITS.maintenance_rate
-_BPS = Decimal(10_000)
-_P = Decimal("0.01")
 
 
 def _utcnow() -> datetime:
@@ -50,7 +49,7 @@ class SimExecutor:
         taker_fee_rate: Decimal,
         spread_bps: Decimal = BAR.proxy_spread_bps,
         impact_bps: Decimal = BAR.impact_bps,
-        leverage: int = LIMITS.max_leverage,
+        notional: Decimal = LIMITS.notional_usd,
         clock: Callable[[], datetime] = _utcnow,
         persist: Callable[[str], None] | None = None,
     ) -> None:
@@ -58,8 +57,8 @@ class SimExecutor:
         self._cash = equity
         self.start_equity = equity   # pnl_drawdown baseline; persisted so a restart keeps the original
         self._fee = taker_fee_rate
-        self._slip = (spread_bps / 2 + impact_bps) / _BPS
-        self._lev = leverage
+        self._spread, self._impact = spread_bps, impact_bps
+        self._notional = notional   # fill_cost's turnover reference: the router's fixed order size
         self._clock = clock
         self._persist = persist
         self._marks: dict[int, Decimal] = {}
@@ -123,16 +122,17 @@ class SimExecutor:
             raise ExecutorTimeout(f"sim: injected timeout for {order.client_order_id}")
         return OrderAck(client_order_id=order.client_order_id, exchange_order_id=xid, status="accepted", reason="", ts=now)
 
-    def _fill(self, order: OrderRequest, now: datetime, quantity: Decimal | None = None) -> FillUpdate:
+    def _fill(self, order: OrderRequest, now: datetime, quantity: Decimal | None = None,
+              price: Decimal | None = None) -> FillUpdate:
         qty = order.quantity if quantity is None else quantity
-        mark = self._marks[order.instrument_id]
-        s = Decimal(1) if order.side == "buy" else Decimal(-1)
-        price = (mark * (1 + s * self._slip)).quantize(_P, rounding=ROUND_HALF_EVEN)
-        fee = qty * price * self._fee
+        px = self._marks[order.instrument_id] if price is None else price
+        fee = fill_cost(notional_delta=qty * px, notional=self._notional, spread_bps=self._spread,
+                        taker_fee_rate=self._fee, impact_bps=self._impact)
         self._cash -= fee
-        self._apply_position(order.instrument_id, s * qty, price)
+        s = Decimal(1) if order.side == "buy" else Decimal(-1)
+        self._apply_position(order.instrument_id, s * qty, px)
         return FillUpdate(client_order_id=order.client_order_id, instrument_id=order.instrument_id, side=order.side,
-                          quantity=qty, price=price, fee=fee, ts=now)
+                          quantity=qty, price=px, fee=fee, ts=now)
 
     def _apply_position(self, iid: int, delta: Decimal, price: Decimal) -> None:
         p = self._pos.setdefault(iid, _Pos())
@@ -183,9 +183,7 @@ class SimExecutor:
                 side = "sell" if p.size > 0 else "buy"
                 req = OrderRequest(client_order_id=f"sim-stop-{iid}-{self._n}", instrument_id=iid, side=side,
                                    quantity=abs(p.size), reduce_only=True, ts=self._clock())
-                self._marks[iid] = trig  # stops fill at the trigger (plus slippage)
-                fill = self._fill(req, self._clock())
-                self._marks[iid] = mark
+                fill = self._fill(req, self._clock(), price=trig)  # stops fill at the trigger
                 fired.append(fill)
                 del self._stops[iid]
         if fired:
@@ -204,13 +202,9 @@ class SimExecutor:
             mark = self._marks[iid]
             u = p.size * (mark - p.entry)
             unreal += u
-            if p.size > 0:
-                liq = p.entry * (1 - Decimal(1) / self._lev + MAINTENANCE_RATE)
-            else:
-                liq = p.entry * (1 + Decimal(1) / self._lev - MAINTENANCE_RATE)
             views.append(PositionView(instrument_id=iid, size=p.size, entry_price=p.entry, notional=abs(p.size) * mark,
-                                      leverage=self._lev, liquidation_price=liq.quantize(_P), unrealised_pnl=u,
-                                      cumulative_funding=p.funding))
+                                      leverage=LIMITS.max_leverage, liquidation_price=liquidation_price(p.size, p.entry),
+                                      unrealised_pnl=u, cumulative_funding=p.funding))
         return AccountSnapshot(equity=self._cash + unreal, positions=tuple(views), open_orders=(),
                                stops=dict(self._stops), in_liquidation=False, ts=self._clock())
 

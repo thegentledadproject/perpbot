@@ -33,13 +33,14 @@ async def test_buy_fills_at_mark_plus_costs_and_emits_events():
     ev = ex.drain_events()
     assert [type(e) for e in ev] == [OrderUpdate, FillUpdate]
     fill = ev[1]
-    # mark 100 * (1 + (5 + 5)/10000) = 100.10 ; fee = 1 * 100.10 * 0.0004 = 0.04004
-    assert fill.price == Decimal("100.10") and fill.fee == Decimal("0.04004")
+    # fills at the mark; cost = fill_cost(traded 100, notional 100, spread 10, fee 0.0004, impact 5)
+    #      = 100 * (0.0004 + 10/20000 + 5/10000 * 1) = 0.14
+    assert fill.price == Decimal(100) and fill.fee == Decimal("0.14")
     snap = await ex.snapshot()
     p = snap.position(6)
-    assert p.size == 1 and p.entry_price == Decimal("100.10")
-    assert p.liquidation_price == (Decimal("100.10") * (1 - Decimal(1) / 3 + MAINTENANCE_RATE)).quantize(Decimal("0.01"))
-    assert snap.equity == Decimal(1000) - fill.fee + (Decimal(100) - Decimal("100.10"))  # marked at mark 100
+    assert p.size == 1 and p.entry_price == Decimal(100)
+    assert p.liquidation_price == (Decimal(100) * (1 - Decimal(1) / 3 + MAINTENANCE_RATE)).quantize(Decimal("0.01"))
+    assert snap.equity == Decimal(1000) - fill.fee
 
 
 async def test_sell_short_and_funding_sign():
@@ -47,7 +48,7 @@ async def test_sell_short_and_funding_sign():
     await ex.submit(req(side="sell"))
     ex.drain_events()
     p = (await ex.snapshot()).position(6)
-    assert p.size == -1 and p.entry_price == Decimal("99.90")
+    assert p.size == -1 and p.entry_price == Decimal(100)
     ex.apply_funding(6, Decimal("0.001"))   # positive funding: shorts RECEIVE
     p2 = (await ex.snapshot()).position(6)
     assert p2.cumulative_funding == Decimal("0.1")   # 1 * 100 * 0.001, received
