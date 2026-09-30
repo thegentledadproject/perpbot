@@ -161,10 +161,12 @@ class InstrumentRouter:
         else:
             self._record(target=target, verdicts={}, intent=None, cid=None, note="hold")
 
-    async def _exit(self, mark: Decimal, reason: str, *, target: Decimal | None) -> None:
-        side = "sell" if self.size > 0 else "buy"
-        intent = Intent(instrument_id=self.instrument_id, side=side, quantity=abs(self.size),
-                        notional=(abs(self.size) * mark).quantize(Decimal("0.01")), reduce_only=True, reason=reason)
+    async def _exit(self, mark: Decimal, reason: str, *, target: Decimal | None,
+                    size: Decimal | None = None) -> None:
+        size = self.size if size is None else size
+        side = "sell" if size > 0 else "buy"
+        intent = Intent(instrument_id=self.instrument_id, side=side, quantity=abs(size),
+                        notional=(abs(size) * mark).quantize(Decimal("0.01")), reduce_only=True, reason=reason)
         await self._send(intent, target=target, verdicts={})
 
     # --- fast loop --------------------------------------------------------------
@@ -266,7 +268,8 @@ class InstrumentRouter:
                 self._update_order(ev.client_order_id, status=ev.status)
                 self._alert("WARN", "order_" + ev.status, client_order_id=ev.client_order_id)
                 self._pending_cid = None
-                self._set_state(State.OPEN if self.size != 0 else State.FLAT)
+                if self.state is not State.HALTED:      # only --clear-halt leaves HALTED
+                    self._set_state(State.OPEN if self.size != 0 else State.FLAT)
             elif db.get_order(self.conn, ev.client_order_id) is not None:
                 self._update_order(ev.client_order_id, status=ev.status, filled_quantity=ev.filled_quantity)
             return
@@ -333,14 +336,17 @@ class InstrumentRouter:
         self._pending_cid = None
         self._set_state(State.HALTED)
 
-    async def shutdown(self, mark: Decimal) -> None:
-        """Kill switch / loss limit (Part A §5): flatten if a position is held, then HALTED until
-        --clear-halt. An already-HALTED router still flattens a position that filled after the halt."""
-        if self.state is State.LIQUIDATED or (self.state is State.HALTED and self.size == 0):
+    async def shutdown(self, mark: Decimal, exchange_size: Decimal | None = None) -> None:
+        """Kill switch / loss limit (Part A s5): flatten if a position is held, then HALTED until
+        --clear-halt. `exchange_size` (the venue's signed position) wins over the local size, so a
+        position the router never saw is still closed (reduce-only makes over-sizing safe). An
+        already-HALTED router still flattens a position that filled after the halt."""
+        held = self.size if exchange_size is None else exchange_size
+        if self.state is State.LIQUIDATED or (self.state is State.HALTED and held == 0):
             return
         was_halted = self.state is State.HALTED
-        if self.size != 0 and self.state in (State.OPEN, State.HALTED):
-            await self._exit(mark, "kill_shutdown", target=None)
+        if held != 0 and self.state in (State.OPEN, State.HALTED, State.FLAT):
+            await self._exit(mark, "kill_shutdown", target=None, size=held)
         if not was_halted:
             self._alert("CRITICAL", "kill_switch", action="shutdown")
         self._set_state(State.HALTED)
@@ -397,8 +403,8 @@ class Portfolio:
                                     detail={"equity": str(snapshot.equity), "start_equity": str(self.start_equity)},
                                     ts=snapshot.ts))
         # ponytail: runs on every shutdown bar, so a position that fills after the shutdown (an entry
-        # in flight) stays open, stop-guarded, until the next bar; upgrade path: flatten on the late
-        # fill itself (InstrumentRouter.handle_event).
+        # in flight) stays open and unguarded (no stop is placed for it) until the next shutdown bar
+        # flattens it; upgrade path: flatten and stop-guard on the late fill itself (Task 6, spec 4.4).
         for router in self.routers.values():
             hist = histories.get(router.instrument_id)
             pos = snapshot.position(router.instrument_id)
@@ -408,7 +414,7 @@ class Portfolio:
                 mark = pos.notional / abs(pos.size)
             else:
                 mark = router.entry or Decimal(0)
-            await router.shutdown(mark)
+            await router.shutdown(mark, pos.size if pos is not None else Decimal(0))
 
     async def on_fast(self, marks: Mapping[int, Decimal]) -> None:
         async with self._lock:

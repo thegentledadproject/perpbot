@@ -7,7 +7,7 @@ from polyperps.execution.order_router import InstrumentRouter, Portfolio, apply_
 from polyperps.execution.sim_executor import SimExecutor
 from dataclasses import replace as dc_replace
 
-from polyperps.execution.types import AccountSnapshot, FillUpdate, Intent, OrderRequest, State
+from polyperps.execution.types import AccountSnapshot, FillUpdate, Intent, OrderRequest, OrderUpdate, State
 from polyperps.exchange.types import SourceType
 from polyperps.monitor.alerts import Alerter, SqliteSink
 from polyperps.monitor.decision_trail import reconstruct
@@ -489,3 +489,50 @@ async def test_position_filled_after_shutdown_is_flattened_on_next_shutdown_bar(
     assert r6.size > 0 and r6.state is State.HALTED
     await pf.on_bar({6: [bar(2)]}, "shutdown"); await pump(pf, ex)
     assert r6.size == 0 and r6.state is State.HALTED
+
+
+def _one_router(start=True):
+    conn = connect(":memory:")
+    ex = SimExecutor("r", equity=Decimal(1000), taker_fee_rate=FEE, clock=lambda: T0)
+    ex.update_mark(6, Decimal(100))
+    alerter = Alerter("r", [SqliteSink(conn)])
+    r6 = InstrumentRouter(run_id="r", instrument_id=6, category="crypto", strategy=Strat(1), executor=ex, conn=conn,
+                          alerter=alerter, categories=CATS, clock=lambda: T0)
+    return conn, ex, r6, Portfolio(run_id="r", executor=ex, conn=conn, alerter=alerter, routers={6: r6},
+                                   start_equity=Decimal(1000))
+
+
+def _cancelled(cid):
+    return OrderUpdate(client_order_id=cid, status="cancelled", filled_quantity=Decimal(0), ts=T0)
+
+
+async def test_cancelled_entry_in_flight_does_not_leave_halted():
+    conn, ex, r6, pf = _one_router()
+    await pf.on_bar({6: [bar(0)]}, "run")
+    cid = r6._pending_cid
+    await pf.on_bar({6: [bar(1)]}, "shutdown")
+    ex.drain_events()                                                         # the entry never fills
+    await pf.dispatch(_cancelled(cid))
+    assert r6.state is State.HALTED
+
+
+async def test_cancelled_kill_exit_in_flight_does_not_leave_halted():
+    conn, ex, r6, pf = _one_router()
+    await pf.on_bar({6: [bar(0)]}, "run"); await pump(pf, ex)
+    await pf.on_bar({6: [bar(1)]}, "shutdown")
+    cid = r6._pending_cid
+    ex.drain_events()                                                         # the kill exit never fills
+    await pf.dispatch(_cancelled(cid))
+    assert r6.state is State.HALTED and r6.size > 0
+
+
+async def test_shutdown_flattens_an_exchange_position_the_router_never_saw():
+    conn, ex, r6, pf = _one_router()
+    await ex.submit(OrderRequest(client_order_id="x-1", instrument_id=6, side="buy", quantity=Decimal(2),
+                                 reduce_only=False, ts=T0))
+    ex.drain_events()                                                         # router saw nothing
+    assert r6.size == 0 and (await ex.snapshot()).position(6).size == Decimal(2)
+    await pf.on_bar({6: [bar(1)]}, "shutdown"); await pump(pf, ex)
+    row = get_order(conn, "r-6-1")
+    assert row.reason == "kill_shutdown" and row.reduce_only and row.side == "sell" and row.quantity == Decimal(2)
+    assert r6.state is State.HALTED
