@@ -1,18 +1,23 @@
 import asyncio
+from types import SimpleNamespace
+
+import pytest
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from polyperps.backtest.bars import Bar
+from polyperps.execution.executor import GateClosed, ShadowRefused
+from polyperps.execution.live_executor import ShadowExecutor
 from polyperps.execution.order_router import InstrumentRouter, Portfolio, apply_guards
 from polyperps.execution.sim_executor import SimExecutor
 from dataclasses import replace as dc_replace
 
-from polyperps.execution.types import AccountSnapshot, FillUpdate, Intent, OrderRequest, OrderUpdate, State
+from polyperps.execution.types import AccountSnapshot, FillUpdate, Intent, OrderAck, OrderRequest, OrderUpdate, State
 from polyperps.exchange.types import SourceType
 from polyperps.monitor.alerts import Alerter, SqliteSink
 from polyperps.monitor.decision_trail import reconstruct
 from polyperps.risk.kill_switch import evaluate
-from polyperps.risk.liquidation_guard import Allow, Reject, Resize
+from polyperps.risk.liquidation_guard import Allow, Reject, Resize, stop_price
 from polyperps.storage.db import connect, get_order, get_positions_local, list_alerts, list_decisions
 
 T0 = datetime(2026, 9, 12, 12, 0, tzinfo=timezone.utc)
@@ -487,6 +492,8 @@ async def test_position_filled_after_shutdown_is_flattened_on_next_shutdown_bar(
     assert r6.state is State.HALTED
     await pump(pf, ex)                                                        # the entry fills after the halt
     assert r6.size > 0 and r6.state is State.HALTED
+    assert r6.stop_trigger is not None and (await ex.snapshot()).stops                # stop-guarded (spec 4.4)
+    assert "unexpected_fill" not in kinds(conn) and "late_fill" in kinds(conn)
     await pf.on_bar({6: [bar(2)]}, "shutdown"); await pump(pf, ex)
     assert r6.size == 0 and r6.state is State.HALTED
 
@@ -536,3 +543,138 @@ async def test_shutdown_flattens_an_exchange_position_the_router_never_saw():
     row = get_order(conn, "r-6-1")
     assert row.reason == "kill_shutdown" and row.reduce_only and row.side == "sell" and row.quantity == Decimal(2)
     assert r6.state is State.HALTED
+
+
+class AckOnlyExecutor(SimExecutor):
+    """The venue acks, but no fill ever happens."""
+    async def submit(self, order):
+        return OrderAck(client_order_id=order.client_order_id, exchange_order_id="x-1", status="accepted",
+                        reason="", ts=self._clock())
+
+
+class RaisingExecutor(SimExecutor):
+    exc: Exception = RuntimeError("boom")
+
+    async def submit(self, order):
+        raise self.exc
+
+
+class FillThenRaise(SimExecutor):
+    async def submit(self, order):
+        await super().submit(order)                  # the order reached the venue and filled...
+        raise RuntimeError("connection reset")       # ...but the call errored on the way back
+
+
+async def test_pending_timeout_adopts_a_lost_fill_and_places_the_stop():
+    now = [T0]
+    conn, ex, strat, router, pf = make(clock=lambda: now[0])
+    await pf.on_bar({6: [bar(0)]}, "run")
+    ex.drain_events()                                    # the fill never reaches us
+    assert router.state is State.ENTRY_PENDING
+    now[0] = T0 + timedelta(seconds=30)
+    await pf.on_fast({6: Decimal(100)})
+    assert router.state is State.ENTRY_PENDING           # not yet: strictly longer than 30 s
+    now[0] = T0 + timedelta(seconds=31)
+    await pf.on_fast({6: Decimal(100)})
+    assert router.state is State.OPEN and router.size == 1
+    entry = (await ex.snapshot()).position(6).entry_price
+    assert (await ex.snapshot()).stops == {6: stop_price(side="long", entry=entry)}
+    assert get_order(conn, "r-6-1").status == "timeout_adopted" and "pending_timeout" in kinds(conn)
+
+
+async def test_pending_timeout_with_nothing_on_the_exchange_goes_flat():
+    now = [T0]
+    conn, ex, strat, router, pf = make(clock=lambda: now[0], executor_cls=AckOnlyExecutor)
+    await pf.on_bar({6: [bar(0)]}, "run")
+    assert router.state is State.ENTRY_PENDING
+    now[0] = T0 + timedelta(seconds=31)
+    await pf.on_fast({6: Decimal(100)})
+    assert router.state is State.FLAT and router.size == 0
+    assert get_order(conn, "r-6-1").status == "timeout_adopted"
+
+
+async def test_late_fill_after_pending_timeout_is_not_counted_twice():
+    """Review focus 1: the fill was delayed, not lost."""
+    now = [T0]
+    conn, ex, strat, router, pf = make(clock=lambda: now[0])
+    await pf.on_bar({6: [bar(0)]}, "run")
+    held = ex.drain_events()
+    now[0] = T0 + timedelta(seconds=31)
+    await pf.on_fast({6: Decimal(100)})
+    assert router.state is State.OPEN and router.size == 1
+    for ev in held:
+        await pf.dispatch(ev)
+    assert router.size == 1 and router.state is State.OPEN and "late_fill" in kinds(conn)
+    assert get_order(conn, "r-6-1").status == "timeout_adopted"
+
+
+async def test_late_fill_while_halted_places_a_stop_and_stays_halted():
+    conn, ex, strat, router, pf = make()
+    ex.fail_queue = ["drop", "drop"]
+    await pf.on_bar({6: [bar(0)]}, "run")
+    assert router.state is State.HALTED and get_order(conn, "r-6-1").status == "lost"
+    await ex.submit(OrderRequest(client_order_id="r-6-1", instrument_id=6, side="buy", quantity=Decimal(1),
+                                 reduce_only=False, ts=T0))  # the "lost" order lands after all
+    await pump(pf, ex)
+    assert router.state is State.HALTED and router.size == 1
+    entry = (await ex.snapshot()).position(6).entry_price
+    assert (await ex.snapshot()).stops == {6: stop_price(side="long", entry=entry)}
+
+
+async def test_foreign_fill_while_halted_moves_the_size_and_places_a_stop():
+    conn, ex, strat, router, pf = make()
+    await router.halt("operator test")
+    await router.handle_event(FillUpdate(client_order_id="foreign-1", instrument_id=6, side="buy",
+                                         quantity=Decimal(1), price=Decimal(100), fee=Decimal(0), ts=T0))
+    assert router.state is State.HALTED and router.size == 1
+    assert (await ex.snapshot()).stops == {6: stop_price(side="long", entry=Decimal(100))}
+
+
+@pytest.mark.parametrize("exc,status", [
+    (GateClosed("instrument 6: POLYMARKET_LIVE_TRADING is not exactly 'true'"), "error"),
+    (RuntimeError("connection reset"), "error"),
+    (ShadowRefused("shadow"), "shadow_refused"),
+])
+async def test_submit_error_marks_the_order_alerts_and_halts(exc, status):
+    conn, ex, strat, router, pf = make(executor_cls=RaisingExecutor)
+    ex.exc = exc
+    await pf.on_bar({6: [bar(0)]}, "run")
+    assert router.state is State.HALTED and router.size == 0
+    assert get_order(conn, "r-6-1").status == status
+    crit = [a[2] for a in list_alerts(conn, "r") if a[1] == "CRITICAL"]
+    assert "submit_error" in crit and "halted" in crit
+
+
+async def test_fill_after_submit_error_is_not_counted_twice():
+    """Review focus 1: the order landed before the call errored; its fill event arrives after we
+    already adopted the exchange size."""
+    conn, ex, strat, router, pf = make(executor_cls=FillThenRaise)
+    await pf.on_bar({6: [bar(0)]}, "run")
+    assert router.state is State.HALTED and router.size == 1                 # adopted from the exchange
+    assert (await ex.snapshot()).stops == {6: stop_price(side="long", entry=router.entry)}
+    await pump(pf, ex)                                                       # the fill event arrives late
+    assert router.size == 1 and router.state is State.HALTED and "late_fill" in kinds(conn)
+    assert get_order(conn, "r-6-1").status == "error"
+
+
+class FlatAccount:
+    """The real account as a perps session sees it: flat, no orders."""
+    async def fetch_portfolio(self):
+        return SimpleNamespace(positions=(), margin=SimpleNamespace(total_account_value=Decimal(1000)),
+                               in_liquidation=False)
+
+    async def fetch_open_orders(self):
+        return ()
+
+
+async def test_shadow_records_the_would_be_order_and_halts():
+    conn = connect(":memory:")
+    ex = ShadowExecutor(FlatAccount(), clock=lambda: T0)
+    alerter = Alerter("r", [SqliteSink(conn)])
+    router = InstrumentRouter(run_id="r", instrument_id=6, category="crypto", strategy=Strat(1), executor=ex,
+                              conn=conn, alerter=alerter, categories=CATS, clock=lambda: T0)
+    pf = Portfolio(run_id="r", executor=ex, conn=conn, alerter=alerter, routers={6: router})
+    await pf.on_bar({6: [bar(0)]}, "run")
+    o = get_order(conn, "r-6-1")
+    assert o.status == "shadow_refused" and o.side == "buy" and router.state is State.HALTED
+    assert list_decisions(conn, "r", 6)[0].client_order_id == "r-6-1"

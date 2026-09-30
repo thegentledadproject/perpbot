@@ -210,9 +210,15 @@ class LiveExecutor(LiveReader):
             if not d.allowed:
                 raise GateClosed(f"instrument {iid}: {d.reason}")
         super().__init__(session, clock=clock)
+        self._gate = check
         self._dead_man = timedelta(seconds=dead_man_s)
 
     async def submit(self, order: OrderRequest) -> OrderAck:
+        # Part A §4.8: the locks are re-read on every order, not only at construction; a lock
+        # that closed mid-run (env flipped, approval revoked) stops the next order here.
+        d = self._gate(order.instrument_id)
+        if not d.allowed:
+            raise GateClosed(f"instrument {order.instrument_id}: {d.reason}")
         try:
             placement = await self._s.place_order(
                 instrument_id=order.instrument_id, side=_ORDER_SIDE_MAP[order.side], quantity=order.quantity,

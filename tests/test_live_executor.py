@@ -210,3 +210,14 @@ def test_live_executor_is_a_gated_live_reader():
     assert issubclass(LiveExecutor, LiveReader) and issubclass(ShadowExecutor, LiveReader)
     with pytest.raises(GateClosed):
         LiveExecutor(FakeSession(), instrument_ids=[6], modes={}, gate=lambda iid: GateDecision(False, "closed"))
+
+
+async def test_submit_rechecks_the_gate_on_every_order():
+    s = FakeSession()
+    lock = {"open": True}
+    ex = LiveExecutor(s, instrument_ids=[6], modes={}, gate=lambda iid: GateDecision(lock["open"], "env flipped"),
+                      clock=lambda: T0)
+    lock["open"] = False
+    with pytest.raises(GateClosed):
+        await ex.submit(_req())
+    assert not any(c[0] == "place_order" for c in s.calls)

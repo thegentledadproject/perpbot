@@ -31,7 +31,13 @@ from polyperps.risk.portfolio_exposure import EXPOSURE, ExposureLimits, vet_expo
 from polyperps.storage import db
 
 _Q = Decimal("0.00000001")
-_TERMINAL_ORDER_STATUSES = frozenset({"filled", "cancelled", "auto_cancelled", "rejected", "lost"})
+_TERMINAL_ORDER_STATUSES = frozenset({"filled", "cancelled", "auto_cancelled", "rejected", "lost", "error",
+                                      "shadow_refused"})
+# Orders we stopped waiting for and replaced with the exchange's size. A later fill for one of these
+# re-reads the exchange instead of adding to a size that may already include it (Part A §4.4/§4.5).
+# "timeout_adopted" (pending timeout), not "adopted": recovery already uses "adopted" for "still resting".
+_GAVE_UP_STATUSES = frozenset({"lost", "error", "shadow_refused", "timeout_adopted"})
+PENDING_TIMEOUT_S = 30
 
 
 def _utcnow() -> datetime:
@@ -86,6 +92,7 @@ class InstrumentRouter:
         self.stop_trigger: Decimal | None = None
         self.cumulative_funding = Decimal(0)
         self._pending_cid: str | None = None
+        self._pending_since: datetime | None = None
         self._dseq = 0  # decision-row primary-key counter; distinct from self.seq (order count / cid numbering)
         self._last_margin_level: str | None = None   # I5: margin_ratio alerts fire on level transitions only
 
@@ -215,6 +222,7 @@ class InstrumentRouter:
                                             avg_price=None, submitted_at=now, updated_at=now, reason=intent.reason))
         prior = self.state
         self._pending_cid = cid
+        self._pending_since = now
         self._set_state(State.EXIT_PENDING if intent.reduce_only else State.ENTRY_PENDING)
         # Captured before the await: with a live executor, the event pump can apply this same
         # order's WS fill through handle_event() (updating self.size) while we're still waiting
@@ -222,7 +230,20 @@ class InstrumentRouter:
         size_before = self.size
         req = OrderRequest(client_order_id=cid, instrument_id=self.instrument_id, side=intent.side,
                            quantity=intent.quantity, reduce_only=intent.reduce_only, ts=now)
-        ack = await self._submit_with_recovery(req, size_before)
+        try:
+            ack = await self._submit_with_recovery(req, size_before)
+        except Exception as exc:
+            # Part A §4.5: any submit error other than a timeout (GateClosed, ShadowRefused, a
+            # transport error). The order may or may not be on the venue: take the venue's size as
+            # ours, guard it, and stop trading this instrument until a human looks.
+            self._update_order(cid, status="shadow_refused" if isinstance(exc, ShadowRefused) else "error",
+                               reason=f"{type(exc).__name__}: {exc}")
+            self._alert("CRITICAL", "submit_error", client_order_id=cid, error=type(exc).__name__)
+            # HALTED before adopting: if the adoption itself fails (snapshot or stop placement), the
+            # router is still frozen rather than left pending.
+            await self.halt(f"submit error: {type(exc).__name__}")
+            await self._adopt(await self.executor.snapshot())
+            return
         if ack is None:
             self._update_order(cid, status="lost", reason="no ack after timeout and retry")
             await self.halt("order lost after timeout and retry")
@@ -269,6 +290,41 @@ class InstrumentRouter:
             return
         db.upsert_order(self.conn, replace(row, **changes, updated_at=self.clock()))
 
+    async def check_pending(self, snapshot: AccountSnapshot) -> None:
+        """Part A §4.3: a router must not sit in a pending state forever waiting for a fill that
+        never arrives. After PENDING_TIMEOUT_S, adopt the exchange's size."""
+        if self.state not in (State.ENTRY_PENDING, State.EXIT_PENDING) or self._pending_since is None:
+            return
+        if (self.clock() - self._pending_since).total_seconds() <= PENDING_TIMEOUT_S:
+            return
+        cid = self._pending_cid
+        self._alert("WARN", "pending_timeout", client_order_id=cid, state=self.state.value)
+        if cid is not None:
+            self._update_order(cid, status="timeout_adopted", reason="pending timeout: adopted the exchange size")
+        await self._adopt(snapshot)
+        self._set_state(State.OPEN if self.size != 0 else State.FLAT)
+        if self.size == 0:
+            hook = getattr(self.strategy, "on_flatten", None)
+            if callable(hook):
+                hook()
+
+    async def _adopt(self, snapshot: AccountSnapshot) -> None:
+        """Take the exchange's size as ours (exchange = truth) and make sure a venue stop guards it.
+        Leaves the state to the caller."""
+        self._pending_cid = None
+        self._pending_since = None
+        pos = snapshot.position(self.instrument_id)
+        if pos is None or pos.size == 0:
+            self.size, self.entry, self.stop_trigger = Decimal(0), None, None
+            self.cumulative_funding = Decimal(0)
+        else:
+            self.size, self.entry, self.cumulative_funding = pos.size, pos.entry_price, pos.cumulative_funding
+            if self.instrument_id in snapshot.stops:
+                self.stop_trigger = snapshot.stops[self.instrument_id]
+            else:
+                self.stop_trigger = await place_exchange_stop(self.executor, pos, self.limits)
+        self._persist()
+
     # --- events -------------------------------------------------------------------
     async def handle_event(self, ev: OrderUpdate | FillUpdate) -> None:
         if isinstance(ev, OrderUpdate):
@@ -278,13 +334,24 @@ class InstrumentRouter:
                 self._pending_cid = None
                 if self.state is not State.HALTED:      # only --clear-halt leaves HALTED
                     self._set_state(State.OPEN if self.size != 0 else State.FLAT)
-            elif db.get_order(self.conn, ev.client_order_id) is not None:
-                self._update_order(ev.client_order_id, status=ev.status, filled_quantity=ev.filled_quantity)
+            else:
+                row = db.get_order(self.conn, ev.client_order_id)
+                if row is not None and row.status not in _GAVE_UP_STATUSES:
+                    self._update_order(ev.client_order_id, status=ev.status, filled_quantity=ev.filled_quantity)
             return
         if ev.instrument_id != self.instrument_id:
             return
+        row = db.get_order(self.conn, ev.client_order_id)
+        if row is not None and row.status in _GAVE_UP_STATUSES and ev.client_order_id != self._pending_cid:
+            # We already replaced this order with the exchange's size (or gave up on it). The
+            # exchange is truth: re-read it instead of adding a fill the adoption may include.
+            self._alert("WARN", "late_fill", client_order_id=ev.client_order_id, state=self.state.value)
+            await self._adopt(await self.executor.snapshot())
+            if self.state is not State.HALTED:
+                self._set_state(State.OPEN if self.size != 0 else State.FLAT)
+            return
         size_before = self.size
-        ours = db.get_order(self.conn, ev.client_order_id) is not None
+        ours = row is not None
         self._apply_fill(ev)
         if ours:
             self._update_order(ev.client_order_id, status="filled", filled_quantity=ev.quantity, avg_price=ev.price)
@@ -304,6 +371,11 @@ class InstrumentRouter:
                 hook()
             if not was_pending and not ours:
                 self._alert("WARN", "stop_fired", price=ev.price, quantity=ev.quantity)
+        elif self.state is State.HALTED:
+            # Part A §4.4: a fill that lands while HALTED still moves the position. Guard it; stay HALTED.
+            self._alert("WARN", "late_fill", client_order_id=ev.client_order_id, state=self.state.value,
+                        size_after=self.size)
+            await self.replace_stop()
         else:
             # Neither "our pending entry landed" nor "flattened" - a fill we weren't tracking
             # (e.g. one that arrives after clear_halt(), or for an id we never sent). Surface it
@@ -370,6 +442,7 @@ class InstrumentRouter:
         if state not in (State.ENTRY_PENDING, State.EXIT_PENDING):
             raise ValueError(f"adopt_pending: state must be ENTRY_PENDING or EXIT_PENDING, got {state}")
         self._pending_cid = client_order_id
+        self._pending_since = self.clock()
         self._set_state(state)
 
 
@@ -411,8 +484,8 @@ class Portfolio:
                                     detail={"equity": str(snapshot.equity), "start_equity": str(self.start_equity)},
                                     ts=snapshot.ts))
         # ponytail: runs on every shutdown bar, so a position that fills after the shutdown (an entry
-        # in flight) stays open and unguarded (no stop is placed for it) until the next shutdown bar
-        # flattens it; upgrade path: flatten and stop-guard on the late fill itself (Task 6, spec 4.4).
+        # in flight) stays open - stop-guarded by the HALTED late-fill path (spec 4.4) - until the next
+        # shutdown bar flattens it; upgrade path: flatten on the late fill itself.
         for router in self.routers.values():
             hist = histories.get(router.instrument_id)
             pos = snapshot.position(router.instrument_id)
@@ -427,6 +500,8 @@ class Portfolio:
     async def on_fast(self, marks: Mapping[int, Decimal]) -> AccountSnapshot:
         async with self._lock:
             snapshot = await self.executor.snapshot()
+            for router in self.routers.values():
+                await router.check_pending(snapshot)
             for iid, mark in marks.items():
                 router = self.routers.get(iid)
                 if router is not None:
