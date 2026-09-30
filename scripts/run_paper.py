@@ -161,7 +161,6 @@ async def run_once(args, settings) -> None:
     stop = asyncio.Event()
 
     def on_accept(tick):
-        db.insert_tick(conn, tick)
         marks[tick.instrument_id] = tick.mark_price
         executor.update_mark(tick.instrument_id, tick.mark_price)
         bar = builder.on_tick(tick)

@@ -81,3 +81,9 @@ def test_connect_enables_wal_on_file_db(tmp_path):
     conn = connect(tmp_path / "x.sqlite3")
     assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
     conn.close()
+
+
+def test_connect_waits_30s_for_the_write_lock(tmp_path):
+    # feed, paper, prune and healthcheck share one file; the 5 s default made paper crash under prune.
+    conn = connect(tmp_path / "t.sqlite3")
+    assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 30_000
