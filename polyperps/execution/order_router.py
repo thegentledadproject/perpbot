@@ -22,7 +22,7 @@ from polyperps.execution.types import (
     AccountSnapshot, DecisionRow, FillUpdate, Intent, OrderAck, OrderRequest, OrderRow, OrderUpdate,
     PositionLocalRow, PositionView, ReconcileNow, State,
 )
-from polyperps.monitor.alerts import Alert, Alerter, margin_alert, pnl_alert
+from polyperps.monitor.alerts import Alert, Alerter, funding_drift_alert, margin_alert, pnl_alert
 from polyperps.risk.kill_switch import Action, loss_limit
 from polyperps.risk.liquidation_guard import (
     LIMITS, Reject, Resize, RiskLimits, Verdict, check_open, funding_exit_due, stop_price, verdict_label, vet_entry,
@@ -498,6 +498,7 @@ class Portfolio:
         self.reconcile = reconcile if reconcile is not None else self._reconcile
         self.start_equity = start_equity                # I7: pnl_drawdown baseline; None = alert unwired
         self._last_pnl_level: str | None = None
+        self._funding_seen: dict[int, Decimal] = {}   # last cumulative funding per instrument, for §4.11
         self._lock = asyncio.Lock()
 
     async def on_bar(self, histories: Mapping[int, Sequence[Bar]], kill: Action) -> None:
@@ -506,6 +507,7 @@ class Portfolio:
             if kill == "shutdown":
                 await self._shutdown(snapshot, histories)
                 return
+            self._check_funding(histories, snapshot)
             for iid, history in histories.items():
                 router = self.routers.get(iid)
                 if router is not None and history:
@@ -515,6 +517,25 @@ class Portfolio:
                     pending = [r.pending_intent for r in self.routers.values()
                                if r is not router and r.state is State.ENTRY_PENDING and r.pending_intent is not None]
                     await router.on_bar(history, snapshot, kill, pending=pending)
+
+    def _check_funding(self, histories: Mapping[int, Sequence[Bar]], snapshot: AccountSnapshot) -> None:
+        """Part A §4.11: the funding the venue actually charged since the last bar (delta of the
+        position's cumulative funding) vs bar.funding_rate x notional. Sign convention: negative
+        cumulative funding = paid (PositionView); the live smoke script confirms the SDK's."""
+        for iid, history in histories.items():
+            pos = snapshot.position(iid)
+            if pos is None or pos.size == 0 or not history or history[-1].funding_rate is None:
+                self._funding_seen.pop(iid, None)
+                continue
+            prev = self._funding_seen.get(iid)
+            self._funding_seen[iid] = pos.cumulative_funding
+            if prev is None or pos.notional == 0:
+                continue   # first sighting of this position: a baseline, nothing to compare
+            realised_rate = (prev - pos.cumulative_funding) / pos.notional                # paid is positive
+            expected_rate = history[-1].funding_rate * (1 if pos.size > 0 else -1)       # longs pay positive rates
+            a = funding_drift_alert(realised_rate, expected_rate, iid, snapshot.ts)
+            if a is not None:
+                self.alerter.emit(a)
 
     async def _shutdown(self, snapshot: AccountSnapshot, histories: Mapping[int, Sequence[Bar]]) -> None:
         """Flatten every open position and halt EVERY router, not only the ones whose bar just
@@ -554,8 +575,6 @@ class Portfolio:
                 if a is not None and level != self._last_pnl_level:
                     self.alerter.emit(a)
                 self._last_pnl_level = level
-            # funding_drift_alert would go here (realised vs expected funding per instrument);
-            # deferred to Phase 2b - the sim's funding is the predicted rate, so it can never drift.
             return snapshot
 
     async def dispatch(self, ev: OrderUpdate | FillUpdate | ReconcileNow) -> None:

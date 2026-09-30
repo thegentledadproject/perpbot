@@ -824,3 +824,17 @@ async def test_second_router_counts_the_first_routers_in_flight_entry():
     assert r6.state is State.ENTRY_PENDING and get_order(conn, "r-6-1").quantity == 1
     # equity 200: cluster net cap 0.6 x 200 = 120; r6's 100 in flight leaves 20 for r7
     assert get_order(conn, "r-7-1").quantity == Decimal("0.20000000")
+
+
+async def test_funding_drift_alerts_when_charged_funding_is_3x_the_bar_rate():
+    conn, ex, strat, router, pf = make()
+    await pf.on_bar({6: [bar(0)]}, "run"); await pump(pf, ex)                 # long 1 @ 100
+    hist = [bar(0)]
+    for i, charged in ((1, "0.0001"), (2, "0.0001"), (3, "0.0003")):
+        ex.apply_funding(6, Decimal(charged))                                  # what the venue charged
+        hist = hist + [bar(i, funding="0.0001")]                               # what the bar predicted
+        await pf.on_bar({6: hist}, "run")
+        if i == 2:
+            assert "funding_drift" not in kinds(conn)                          # 1st sighting is a baseline; then 1x
+    drift = [a for a in list_alerts(conn, "r") if a[2] == "funding_drift"]
+    assert len(drift) == 1 and drift[0][1] == "WARN" and drift[0][3] == 6
