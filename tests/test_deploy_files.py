@@ -17,7 +17,8 @@ SHELL_FILES = ["bootstrap.sh", "update.sh"]
 
 # All deploy files must be plain LF text, deploy.ps1 included - PowerShell
 # 5.1 does not require CRLF, and the repo standardizes on LF everywhere.
-LF_ONLY_FILES = UNIT_FILES + ["env.example"] + SHELL_FILES + ["deploy.ps1"]
+LF_ONLY_FILES = UNIT_FILES + ["env.example"] + SHELL_FILES + ["deploy.ps1", "polyperps-health.service", "polyperps-health.timer",
+                                                                              "polyperps-prune.service", "polyperps-prune.timer"]
 
 LIVE_EXECUTOR_RE = re.compile(r"--executor\s+live")
 
@@ -99,3 +100,24 @@ def test_deploy_scripts_know_the_dashboard_unit():
         assert "polyperps-dashboard" in (DEPLOY_DIR / name).read_text(encoding="utf-8")
     assert "polyperps-dashboard" in (DEPLOY_DIR / "deploy.ps1").read_text(encoding="utf-8")
     assert "POLYPERPS_DASHBOARD_BIND=0.0.0.0:80" in (DEPLOY_DIR / "env.example").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("name", ["polyperps-feed.service", "polyperps-paper.service"])
+def test_long_running_units_are_supervised_by_systemd(name):
+    # The scripts no longer restart themselves; systemd must, even after a clean exit.
+    text = _read(name)
+    assert "Restart=always" in text
+    assert "RestartMaxDelaySec=" in text
+
+
+def test_health_check_is_wired():
+    health = _read("polyperps-health.service")
+    assert "User=polyperps" in health
+    assert "ImportCredential=TELEGRAM_BOT_TOKEN" in health
+    for script in EXEC_START_RE.findall(health):
+        assert (REPO_ROOT / script).is_file()
+    assert "OnUnitActiveSec=5min" in _read("polyperps-health.timer")
+    assert "OnFailure=polyperps-health.service" in _read("polyperps-prune.service")
+    assert "ImportCredential=TELEGRAM_BOT_TOKEN" in _read("polyperps-paper.service")
+    for name in ("bootstrap.sh", "update.sh"):
+        assert "polyperps-health.timer" in _read(name)

@@ -10,8 +10,12 @@ Group=polyperps
 WorkingDirectory=/opt/polyperps
 EnvironmentFile=/etc/polyperps/env
 ExecStart=/opt/polyperps/.venv/bin/python scripts/run_feed.py
-Restart=on-failure
+# The scripts do not restart themselves; systemd does, even after a clean exit
+# (stream ended). Backoff 10 s -> 120 s over 5 steps if it keeps crashing.
+Restart=always
 RestartSec=10
+RestartSteps=5
+RestartMaxDelaySec=120
 KillSignal=SIGTERM
 TimeoutStopSec=30
 NoNewPrivileges=yes

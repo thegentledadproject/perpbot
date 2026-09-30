@@ -9,13 +9,17 @@ User=polyperps
 Group=polyperps
 WorkingDirectory=/opt/polyperps
 EnvironmentFile=/etc/polyperps/env
-# Telegram alert secrets (optional). Uncomment once the files exist
-# (root:root 0600) - see polyperps/security/key_management.py.
-#LoadCredential=TELEGRAM_BOT_TOKEN:/etc/credstore/TELEGRAM_BOT_TOKEN
-#LoadCredential=TELEGRAM_CHAT_ID:/etc/credstore/TELEGRAM_CHAT_ID
+# Telegram alert secrets, if present in /etc/credstore/ (root:root 0600).
+# Missing files are skipped, so nothing needs uncommenting.
+ImportCredential=TELEGRAM_BOT_TOKEN
+ImportCredential=TELEGRAM_CHAT_ID
 ExecStart=/opt/polyperps/.venv/bin/python scripts/run_paper.py --executor sim --hypothesis ${PAPER_HYPOTHESIS} --run-id ${PAPER_RUN_ID}
-Restart=on-failure
+# The scripts do not restart themselves; systemd does, even after a clean exit
+# (stream ended). Backoff 10 s -> 120 s over 5 steps if it keeps crashing.
+Restart=always
 RestartSec=10
+RestartSteps=5
+RestartMaxDelaySec=120
 KillSignal=SIGTERM
 TimeoutStopSec=30
 NoNewPrivileges=yes

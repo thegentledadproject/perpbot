@@ -1,3 +1,4 @@
+import asyncio
 import importlib.util
 import sys
 from datetime import datetime, timedelta, timezone
@@ -42,9 +43,9 @@ def test_constants_pinned():
     assert mod.HEARTBEAT_S == 20 and mod.RECONCILE_S == 60
 
 
-def test_run_id_minted_once_across_supervised_restarts(monkeypatch, tmp_path):
-    """C1: a supervised restart must reopen the SAME paper account, so run_id is chosen once
-    in main() and handed down to every run_once() - not re-minted per attempt."""
+def test_main_runs_once_and_lets_a_crash_exit(monkeypatch, tmp_path):
+    """systemd (Restart=always) is the supervisor: a crash must leave the process so systemd
+    counts it, not loop inside it. run_id is still minted once in main()."""
     monkeypatch.setenv("POLYPERPS_INSTRUMENT_IDS", "6")
     monkeypatch.setenv("POLYPERPS_DB_PATH", str(tmp_path / "t.sqlite3"))
     monkeypatch.setattr(sys, "argv", ["run_paper.py", "--executor", "sim", "--hypothesis", "h1"])
@@ -53,17 +54,43 @@ def test_run_id_minted_once_across_supervised_restarts(monkeypatch, tmp_path):
 
     async def fake_run_once(args, settings):
         seen.append(args.run_id)
-        if len(seen) == 1:
-            raise RuntimeError("crash once -> supervisor restarts")
-        raise SystemExit(0)   # second attempt: stop the supervisor
+        raise RuntimeError("database is locked")
 
     monkeypatch.setattr(mod, "run_once", fake_run_once)
-    monkeypatch.setattr(mod, "INITIAL_BACKOFF_S", 0.0)
-    monkeypatch.setattr(mod, "MAX_BACKOFF_S", 0.0)
-    with pytest.raises(SystemExit):
+    with pytest.raises(RuntimeError, match="locked"):
         mod.main()
-    assert len(seen) == 2 and seen[0] == seen[1]
-    assert seen[0].startswith("paper-")
+    assert len(seen) == 1 and seen[0].startswith("paper-")
+
+
+def test_run_until_first_exits_propagates_a_dead_loop_and_cancels_the_rest():
+    mod = load()
+    cancelled = []
+
+    async def forever():
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            cancelled.append(True)
+            raise
+
+    async def dies():
+        raise RuntimeError("database is locked")
+
+    with pytest.raises(RuntimeError, match="locked"):
+        asyncio.run(mod.run_until_first_exits(forever(), dies()))
+    assert cancelled == [True]
+
+
+def test_run_until_first_exits_returns_when_one_finishes_cleanly():
+    mod = load()
+
+    async def forever():
+        await asyncio.sleep(3600)
+
+    async def ends():
+        return None
+
+    asyncio.run(asyncio.wait_for(mod.run_until_first_exits(forever(), ends()), 5))
 
 
 def _candle(ts, close="100"):

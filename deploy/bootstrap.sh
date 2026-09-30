@@ -69,8 +69,8 @@ fi
 
 echo "== systemd units =="
 # Gate the copy on content so a re-run of bootstrap.sh doesn't clobber an
-# operator's uncommented LoadCredential= lines in the installed paper unit.
-for unit in polyperps-feed.service polyperps-paper.service polyperps-dashboard.service polyperps-prune.service polyperps-prune.timer; do
+# operator's local edits to the installed units.
+for unit in polyperps-feed.service polyperps-paper.service polyperps-dashboard.service polyperps-prune.service polyperps-prune.timer polyperps-health.service polyperps-health.timer; do
   if ! cmp -s "/opt/polyperps/deploy/${unit}" "/etc/systemd/system/${unit}"; then
     cp "/opt/polyperps/deploy/${unit}" "/etc/systemd/system/${unit}"
     systemctl daemon-reload
@@ -78,20 +78,21 @@ for unit in polyperps-feed.service polyperps-paper.service polyperps-dashboard.s
 done
 systemctl enable polyperps-feed polyperps-paper polyperps-dashboard
 systemctl enable --now polyperps-prune.timer
+systemctl enable polyperps-health.timer   # started with the services in step 4
 
 cat <<'EOF'
 
 == next steps ==
 1. Edit /etc/polyperps/env (instrument ids, db path, hypothesis, run id).
-2. Optionally drop Telegram secrets into /etc/credstore/ (root:root 0600)
-   and uncomment the LoadCredential= lines in
-   /etc/systemd/system/polyperps-paper.service, then: systemctl daemon-reload
+2. Optionally drop Telegram secrets into /etc/credstore/TELEGRAM_BOT_TOKEN and
+   /etc/credstore/TELEGRAM_CHAT_ID (root:root 0600); the paper and health units
+   import them automatically on their next start.
 3. One-time data setup as the service user (the paper run refuses to start
    without a stored fee row, and seeds its strategy history from candles):
      cd /opt/polyperps && sudo -u polyperps env $(grep -v '^#' /etc/polyperps/env | xargs)        .venv/bin/python scripts/store_fees.py
      cd /opt/polyperps && sudo -u polyperps env $(grep -v '^#' /etc/polyperps/env | xargs)        .venv/bin/python scripts/backfill.py --days 31 --interval 1h
 4. Start the services:
-     systemctl start polyperps-feed polyperps-paper polyperps-dashboard
+     systemctl start polyperps-feed polyperps-paper polyperps-dashboard polyperps-health.timer
 5. Watch them:
      journalctl -fu polyperps-feed
      journalctl -fu polyperps-paper
