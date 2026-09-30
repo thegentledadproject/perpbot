@@ -25,9 +25,16 @@ def test_refuses_without_the_typed_confirmation():
         opened.append(label)
         raise AssertionError("must not open a session")
 
-    for answers in (["7", mod.CONFIRM], ["6", "i accept real orders"], ["6", ""], ["", mod.CONFIRM]):
+    for answers in (["7", mod.CONFIRM], ["6", "i accept real orders"], ["6", ""], ["", mod.CONFIRM], []):
         it = iter(answers)
-        code = mod.main(["--instrument", "6", "--quantity", "0.001"], ask=lambda _p: next(it),
+
+        def ask(_p, it=it):
+            try:
+                return next(it)
+            except StopIteration:
+                raise EOFError
+
+        code = mod.main(["--instrument", "6", "--quantity", "0.001"], ask=ask,
                         say=lambda _m: None, open_session=open_session)
         assert code == 2
     assert opened == []
@@ -108,3 +115,64 @@ def test_smoke_with_a_fake_session_places_order_and_stop_and_sees_the_venue_fill
     assert stop["instrument_id"] == 6 and stop["stop_loss"].trigger_price == Decimal("99.00")
     assert ("close", {}) in session.calls and sdk.closed
     assert any("stop_filled_by_exchange': True" in s for s in said)
+
+
+def _run_main(mod, session, *, extra=(), poll_s=0):
+    answers = iter(["6", mod.CONFIRM])
+    said = []
+
+    async def open_session(label):
+        return SimpleNamespace(close=lambda: asyncio.sleep(0)), session
+
+    def ask(prompt):
+        return "" if prompt.startswith("kill the bot now") else next(answers)
+
+    return said, lambda: mod.main(["--instrument", "6", "--quantity", "0.001", *extra], ask=ask,
+                                  say=said.append, open_session=open_session, poll_s=poll_s)
+
+
+def test_failed_stop_placement_warns_a_position_may_be_open_and_propagates():
+    import pytest
+    mod = load()
+    session = FakeSmokeSession()
+
+    async def boom(**kw):
+        raise RuntimeError("tp_sl rejected")
+
+    session.place_position_tp_sl = boom
+    said, run = _run_main(mod, session)
+    with pytest.raises(RuntimeError):
+        run()
+    assert any("A REAL POSITION MAY BE OPEN on instrument 6 with NO stop" in s for s in said)
+
+
+def test_failed_entry_order_warns_it_may_have_filled():
+    import pytest
+    mod = load()
+    session = FakeSmokeSession()
+
+    async def boom(**kw):
+        raise TimeoutError
+
+    session.place_order = boom
+    said, run = _run_main(mod, session)
+    with pytest.raises(TimeoutError):
+        run()
+    assert any("entry order MAY HAVE FILLED" in s for s in said)
+
+
+def test_stop_that_never_fills_times_out_with_close_instructions_and_exit_1(monkeypatch):
+    mod = load()
+    monkeypatch.setattr(mod, "STOP_WAIT_S", 0.05)
+    said, run = _run_main(mod, FakeSmokeSession(), poll_s=0.01)
+    assert run() == 1
+    assert any("A REAL POSITION MAY BE OPEN" in s for s in said)
+
+
+def test_non_positive_or_non_finite_quantity_is_refused_before_any_session():
+    import pytest
+    mod = load()
+    for bad in ("0", "-1", "NaN", "Infinity"):
+        with pytest.raises(SystemExit) as e:
+            mod.main(["--instrument", "6", "--quantity", bad], ask=lambda _p: "", say=lambda _m: None)
+        assert e.value.code == 2
