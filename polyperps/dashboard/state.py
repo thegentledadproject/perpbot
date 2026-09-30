@@ -5,7 +5,6 @@ Every number the page shows is computed here so it can be pinned by tests.
 """
 from __future__ import annotations
 
-import json
 import os
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -70,14 +69,10 @@ def _opened_at(orders, iid: int) -> str | None:
 def account_and_positions(
     conn, *, run_id: str, instruments: Mapping[int, InstrumentInfo] | None,
 ) -> tuple[dict | None, list[dict]]:
-    text = db.load_sim_account(conn, run_id)
-    if text is None:
+    loaded = db.load_account_snapshot(conn, run_id)
+    if loaded is None:
         return None, []
-    blob = json.loads(text)
-    cash = _dec(blob["cash"])
-    start_equity = _dec(blob.get("start_equity", blob["cash"]))
-    marks = {int(k): _dec(v) for k, v in blob.get("marks", {}).items()}
-    stops = {int(k): _dec(v) for k, v in blob.get("stops", {}).items()}
+    snap, start_equity, _executor = loaded
     local = db.get_positions_local(conn, run_id)
     fills = db.list_orders(conn, run_id, status="filled")
 
@@ -86,24 +81,23 @@ def account_and_positions(
     gross = _ZERO
     net_by_cluster: dict[str, Decimal] = {}
     all_known = instruments is not None
-    for key, p in blob.get("positions", {}).items():
-        iid = int(key)
-        size, entry, funding = _dec(p["size"]), _dec(p["entry"]), _dec(p["funding"])
+    for p in snap.positions:
+        iid, size, entry, funding = p.instrument_id, p.size, p.entry_price, p.cumulative_funding
         if size == 0:
             continue
-        mark = marks.get(iid, entry)
-        pnl = size * (mark - entry)
+        mark = p.notional / abs(size)
+        pnl = p.unrealised_pnl
         unreal += pnl
-        notional = abs(size) * mark
+        notional = p.notional
         gross += notional
-        liq = liq_price(size, entry)
+        # the venue's own number in shadow/live; the sim's formula when a snapshot carries none
+        liq = p.liquidation_price if p.liquidation_price is not None else liq_price(size, entry)
         liq_distance = abs(mark - liq) / mark if mark else _ZERO
         move = (mark - entry) / entry if entry else _ZERO
         adverse = max(_ZERO, -move if size > 0 else move)
         base = abs(size) * entry
         # cumulative_funding is negative when funding was PAID (execution/types.py
-        # PositionView docstring; sim_executor.apply_funding accumulates -size*mark*rate),
-        # so negate it here: paid funding must show as a positive cost.
+        # PositionView docstring), so negate it here: paid funding must show as a positive cost.
         funding_paid = -funding / base if base else _ZERO
         inst = instruments.get(iid) if instruments else None
         if inst is None:
@@ -125,11 +119,11 @@ def account_and_positions(
             "liq_distance": _f(liq_distance),
             "adverse_move": _f(adverse),
             "funding_paid": _f(funding_paid),
-            "stop_trigger": _s(stops[iid]) if iid in stops else None,
+            "stop_trigger": _s(snap.stops[iid]) if iid in snap.stops else None,
             "opened_at": _opened_at(fills, iid),
         })
 
-    equity = cash + unreal
+    equity = snap.equity
     cluster_net: float | None = None
     if all_known:
         worst = max((abs(v) for v in net_by_cluster.values()), default=_ZERO)
@@ -144,7 +138,7 @@ def account_and_positions(
         "cluster_net": cluster_net,
         "cluster_limit": _f(EXPOSURE.cluster_net),
         "leverage": LIMITS.max_leverage,
-        "kill_switch": "unarmed",   # Phase 2a: thresholds are None (risk/kill_switch.py)
+        "kill_switch": "unarmed",   # divergence thresholds are None (risk/kill_switch.py)
     }
     return account, positions
 
@@ -291,9 +285,10 @@ def _started_at(conn, run_id: str) -> datetime | None:
 def run_info(conn, *, run_id: str, hypothesis: str, host: str, now: datetime) -> dict:
     started = _started_at(conn, run_id)
     uptime = int((now - started).total_seconds()) if started else 0
+    loaded = db.load_account_snapshot(conn, run_id)
     return {
-        "run_id": run_id, "executor": "sim", "hypothesis": hypothesis, "host": host,
-        "started_at": _iso(started) if started else None, "uptime_s": max(0, uptime),
+        "run_id": run_id, "executor": loaded[2] if loaded is not None else "sim", "hypothesis": hypothesis,
+        "host": host, "started_at": _iso(started) if started else None, "uptime_s": max(0, uptime),
     }
 
 

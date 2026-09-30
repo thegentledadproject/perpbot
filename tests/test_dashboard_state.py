@@ -10,7 +10,7 @@ import pytest
 from polyperps.dashboard import state as st
 from polyperps.exchange.types import Instrument, SourceType, Tick
 from polyperps.execution.sim_executor import SimExecutor
-from polyperps.execution.types import DecisionRow, OrderRow, PositionLocalRow, State
+from polyperps.execution.types import AccountSnapshot, DecisionRow, OrderRow, PositionLocalRow, PositionView, State
 from polyperps.storage.db import (
     connect,
     get_positions_local,
@@ -18,7 +18,7 @@ from polyperps.storage.db import (
     insert_decision,
     insert_recovery,
     insert_tick,
-    save_sim_account,
+    save_account_snapshot,
     upsert_order,
     upsert_position_local,
 )
@@ -52,9 +52,23 @@ def instrument(iid: int, symbol: str, category: str = "crypto") -> Instrument:
 INSTRUMENTS = {6: instrument(6, "BTC"), 7: instrument(7, "ETH")}
 
 
+# The same account as BLOB, as the runner writes it each fast loop (SimExecutor.from_json(BLOB).snapshot()).
+SNAP = AccountSnapshot(
+    equity=Decimal("9997"),
+    positions=(
+        PositionView(instrument_id=6, size=Decimal("0.001"), entry_price=Decimal("100000"), notional=Decimal("101"),
+                     leverage=3, liquidation_price=Decimal("68666.67"), unrealised_pnl=Decimal("1"),
+                     cumulative_funding=Decimal("-0.3")),
+        PositionView(instrument_id=7, size=Decimal("-0.1"), entry_price=Decimal("4000"), notional=Decimal("404"),
+                     leverage=3, liquidation_price=Decimal("5253.33"), unrealised_pnl=Decimal("-4"),
+                     cumulative_funding=Decimal("-0.5")),
+    ),
+    open_orders=(), stops={6: Decimal("85000"), 7: Decimal("4600")}, in_liquidation=False, ts=T0)
+
+
 def seeded_conn():
     conn = connect(":memory:")
-    save_sim_account(conn, RUN, json.dumps(BLOB))
+    save_account_snapshot(conn, RUN, SNAP, start_equity=Decimal("10000"), executor="sim")
     upsert_position_local(conn, PositionLocalRow(
         run_id=RUN, instrument_id=6, state=State.OPEN, size=Decimal("0.001"),
         entry_price=Decimal("100000"), stop_trigger=Decimal("85000"), stop_order_id=None,
@@ -128,13 +142,13 @@ def test_position_numbers_short():
     assert p["funding_paid"] == pytest.approx(0.5 / 400)
 
 
-async def test_liq_price_matches_sim_executor():
+async def test_seeded_snapshot_is_what_the_sim_reports():
     ex = SimExecutor.from_json(RUN, json.dumps(BLOB), taker_fee_rate=Decimal("0"))
     snap = await ex.snapshot()
+    assert snap.positions == SNAP.positions and snap.equity == SNAP.equity and snap.stops == SNAP.stops
     by_id = {v.instrument_id: v for v in snap.positions}
     assert st.liq_price(Decimal("0.001"), Decimal("100000")) == by_id[6].liquidation_price
     assert st.liq_price(Decimal("-0.1"), Decimal("4000")) == by_id[7].liquidation_price
-    assert Decimal(st.account_and_positions(seeded_conn(), run_id=RUN, instruments=INSTRUMENTS)[0]["equity"]) == snap.equity
 
 
 def test_unknown_instruments_fall_back():
@@ -144,9 +158,25 @@ def test_unknown_instruments_fall_back():
     assert {p["name"] for p in positions} == {"inst 6", "inst 7"}
 
 
-def test_no_sim_account_yet():
+def test_no_account_snapshot_yet():
     conn = connect(":memory:")
     assert st.account_and_positions(conn, run_id=RUN, instruments=INSTRUMENTS) == (None, [])
+
+
+def test_venue_liquidation_price_is_shown_and_executor_is_reported():
+    conn = connect(":memory:")
+    live_pos = PositionView(
+        instrument_id=6, size=Decimal("0.001"), entry_price=Decimal("100000"), notional=Decimal("101"), leverage=3,
+        liquidation_price=Decimal("70000"), unrealised_pnl=Decimal("1"), cumulative_funding=Decimal("0"))
+    save_account_snapshot(conn, RUN, AccountSnapshot(equity=Decimal("500"), positions=(live_pos,), open_orders=(),
+                                                     stops={}, in_liquidation=False, ts=T0),
+                          start_equity=Decimal("500"), executor="shadow")
+    account, positions = st.account_and_positions(conn, run_id=RUN, instruments=INSTRUMENTS)
+    assert positions[0]["liq_price"] == "70000" and positions[0]["stop_trigger"] is None
+    assert account["equity"] == "500"
+    s = st.build_state(conn, run_id=RUN, instrument_ids=(6,), instruments=INSTRUMENTS, hypothesis="h1",
+                       host="box", now=T0, env={}, signal_validated=False)
+    assert s["run"]["executor"] == "shadow"
 
 
 def test_guards_ok_when_quiet():
