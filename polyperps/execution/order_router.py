@@ -32,7 +32,7 @@ from polyperps.storage import db
 
 _Q = Decimal("0.00000001")
 _TERMINAL_ORDER_STATUSES = frozenset({"filled", "cancelled", "auto_cancelled", "rejected", "lost", "error",
-                                      "shadow_refused"})
+                                      "shadow_refused", "timeout_adopted"})
 # Orders we stopped waiting for and replaced with the exchange's size. A later fill for one of these
 # re-reads the exchange instead of adding to a size that may already include it (Part A §4.4/§4.5).
 # "timeout_adopted" (pending timeout), not "adopted": recovery already uses "adopted" for "still resting".
@@ -275,12 +275,13 @@ class InstrumentRouter:
         return None
 
     def _landed(self, req: OrderRequest, snap: AccountSnapshot, size_before: Decimal) -> bool:
+        """Part A §4.6: the order landed if it rests, or if the position moved in its direction by
+        ANY amount (a partial fill counts). Retrying a partly filled order would double it."""
         if req.client_order_id in snap.open_orders:
             return True
-        delta = req.quantity if req.side == "buy" else -req.quantity
         pos = snap.position(self.instrument_id)
-        actual = pos.size if pos is not None else Decimal(0)
-        return actual == size_before + delta
+        moved = (pos.size if pos is not None else Decimal(0)) - size_before
+        return moved > 0 if req.side == "buy" else moved < 0
 
     def _update_order(self, cid: str, *, skip_if_terminal: bool = False, **changes) -> None:
         row = db.get_order(self.conn, cid)
@@ -289,6 +290,20 @@ class InstrumentRouter:
         if skip_if_terminal and row.status in _TERMINAL_ORDER_STATUSES:
             return
         db.upsert_order(self.conn, replace(row, **changes, updated_at=self.clock()))
+
+    def _record_fill(self, row: OrderRow, ev: FillUpdate) -> None:
+        """Part A §4.6: an order's filled quantity accumulates across fills; a terminal status
+        (e.g. an IOC already reported cancelled) is never downgraded."""
+        filled = row.filled_quantity + ev.quantity
+        if row.avg_price is None or row.filled_quantity == 0:
+            avg = ev.price
+        else:
+            avg = (row.avg_price * row.filled_quantity + ev.price * ev.quantity) / filled
+        if row.status in _TERMINAL_ORDER_STATUSES:
+            status = row.status
+        else:
+            status = "filled" if filled >= row.quantity else "partial"
+        self._update_order(row.client_order_id, status=status, filled_quantity=filled, avg_price=avg)
 
     async def check_pending(self, snapshot: AccountSnapshot) -> None:
         """Part A §4.3: a router must not sit in a pending state forever waiting for a fill that
@@ -301,12 +316,7 @@ class InstrumentRouter:
         self._alert("WARN", "pending_timeout", client_order_id=cid, state=self.state.value)
         if cid is not None:
             self._update_order(cid, status="timeout_adopted", reason="pending timeout: adopted the exchange size")
-        await self._adopt(snapshot)
-        self._set_state(State.OPEN if self.size != 0 else State.FLAT)
-        if self.size == 0:
-            hook = getattr(self.strategy, "on_flatten", None)
-            if callable(hook):
-                hook()
+        await self._adopt_and_settle(snapshot)
 
     async def _adopt(self, snapshot: AccountSnapshot) -> None:
         """Take the exchange's size as ours (exchange = truth) and make sure a venue stop guards it.
@@ -322,8 +332,29 @@ class InstrumentRouter:
             if self.instrument_id in snapshot.stops:
                 self.stop_trigger = snapshot.stops[self.instrument_id]
             else:
-                self.stop_trigger = await place_exchange_stop(self.executor, pos, self.limits)
+                try:
+                    self.stop_trigger = await place_exchange_stop(self.executor, pos, self.limits)
+                except ShadowRefused:
+                    # Shadow mode (as in _reconcile): record it; the adopted size must still persist.
+                    self.stop_trigger = None
+                    self._alert("WARN", "shadow_refused", size=pos.size)
         self._persist()
+
+    async def _adopt_and_settle(self, snapshot: AccountSnapshot) -> None:
+        """_adopt, then leave the pending state for the exchange's size (never HALTED: only
+        --clear-halt does) and tell the strategy which side it is on, as a restart does."""
+        await self._adopt(snapshot)
+        if self.state is not State.HALTED:
+            self._set_state(State.OPEN if self.size != 0 else State.FLAT)
+        if self.size == 0:
+            await self.executor.cancel_stop(self.instrument_id)
+            hook = getattr(self.strategy, "on_flatten", None)
+            if callable(hook):
+                hook()
+        else:
+            hook = getattr(self.strategy, "on_recover", None)
+            if callable(hook):
+                hook(1 if self.size > 0 else -1)
 
     # --- events -------------------------------------------------------------------
     async def handle_event(self, ev: OrderUpdate | FillUpdate) -> None:
@@ -337,7 +368,8 @@ class InstrumentRouter:
             else:
                 row = db.get_order(self.conn, ev.client_order_id)
                 if row is not None and row.status not in _GAVE_UP_STATUSES:
-                    self._update_order(ev.client_order_id, status=ev.status, filled_quantity=ev.filled_quantity)
+                    # status only: filled_quantity belongs to the fills, which accumulate it
+                    self._update_order(ev.client_order_id, status=ev.status)
             return
         if ev.instrument_id != self.instrument_id:
             return
@@ -346,15 +378,14 @@ class InstrumentRouter:
             # We already replaced this order with the exchange's size (or gave up on it). The
             # exchange is truth: re-read it instead of adding a fill the adoption may include.
             self._alert("WARN", "late_fill", client_order_id=ev.client_order_id, state=self.state.value)
-            await self._adopt(await self.executor.snapshot())
-            if self.state is not State.HALTED:
-                self._set_state(State.OPEN if self.size != 0 else State.FLAT)
+            self._update_order(ev.client_order_id, filled_quantity=row.filled_quantity + ev.quantity)
+            await self._adopt_and_settle(await self.executor.snapshot())
             return
         size_before = self.size
         ours = row is not None
         self._apply_fill(ev)
         if ours:
-            self._update_order(ev.client_order_id, status="filled", filled_quantity=ev.quantity, avg_price=ev.price)
+            self._record_fill(row, ev)
         if self.state is State.ENTRY_PENDING and ev.client_order_id == self._pending_cid and self.size != 0:
             self._pending_cid = None
             self._set_state(State.OPEN)
@@ -376,6 +407,8 @@ class InstrumentRouter:
             self._alert("WARN", "late_fill", client_order_id=ev.client_order_id, state=self.state.value,
                         size_after=self.size)
             await self.replace_stop()
+        elif ours and self.state is not State.FLAT:
+            pass   # a later partial fill of our own order; the venue stop is position-level
         else:
             # Neither "our pending entry landed" nor "flattened" - a fill we weren't tracking
             # (e.g. one that arrives after clear_halt(), or for an id we never sent). Surface it
@@ -546,9 +579,10 @@ class Portfolio:
         snapshot = await self.executor.snapshot()
         local = db.get_positions_local(self.conn, self.run_id)
         # "known_orders" is what diff() treats as ours-and-possibly-still-resting on the venue.
-        # Terminal rows (filled/cancelled/auto_cancelled/rejected/lost) are done as far as we're
-        # concerned; if the venue still lists one as open that's a genuine unknown_order mismatch
-        # worth raising, not something to mask by including every order id we've ever sent.
+        # Terminal rows (_TERMINAL_ORDER_STATUSES, incl. the given-up lost/error/shadow_refused/
+        # timeout_adopted) are done as far as we're concerned; if the venue still lists one as open
+        # that's a genuine unknown_order mismatch worth raising (and cancelling), not something to
+        # mask by including every order id we've ever sent.
         known = {o.client_order_id for o in db.list_orders(self.conn, self.run_id)
                 if o.status not in _TERMINAL_ORDER_STATUSES}
         mismatches = diff(local=local, remote=snapshot, run_id=self.run_id, known_orders=known)

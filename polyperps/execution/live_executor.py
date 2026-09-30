@@ -92,7 +92,7 @@ _SDK_ORDER_STATUS: dict[str, OrderStatus | None] = {
     "ioc_expired": "rejected",
     "stp_cancelled": "rejected",
     "zero_quantity": "rejected",
-    "duplicate_order": "rejected",
+    "duplicate_order": None,   # a same-id retry: the original order stands (Part A §4.6)
     "order_not_found": "rejected",
     "reduce_only_invalid": "rejected",
     "reduce_only_expired": "rejected",
@@ -180,10 +180,12 @@ class LiveReader:
                                       filled_quantity=p.filled_quantity, ts=ev.timestamp)
             elif kind == "fill":
                 for f in ev.payload:
-                    if f.client_order_id:
-                        yield FillUpdate(client_order_id=f.client_order_id, instrument_id=int(f.instrument_id),
-                                         side=_FILL_SIDE_MAP.get(f.side, f.side), quantity=f.quantity,
-                                         price=f.price, fee=f.fee, ts=ev.timestamp)
+                    # Part A §4.7: stop and liquidation fills carry no client id; keep them and
+                    # let the Portfolio route them by instrument.
+                    cid = f.client_order_id or f"venue-{f.order_id}"
+                    yield FillUpdate(client_order_id=cid, instrument_id=int(f.instrument_id),
+                                     side=_FILL_SIDE_MAP.get(f.side, f.side), quantity=f.quantity,
+                                     price=f.price, fee=f.fee, ts=ev.timestamp)
 
     async def close(self) -> None:
         await self._s.close()
@@ -238,7 +240,8 @@ class LiveExecutor(LiveReader):
             return OrderAck(client_order_id=order.client_order_id, exchange_order_id=exchange_order_id,
                             status="rejected", reason=str(raw_status), ts=self._clock())
         return OrderAck(client_order_id=order.client_order_id, exchange_order_id=exchange_order_id,
-                        status="accepted", reason="", ts=self._clock())
+                        status="accepted", reason="duplicate_order" if raw_status == "duplicate_order" else "",
+                        ts=self._clock())
 
     async def cancel(self, client_order_id: str) -> None:
         await self._s.cancel_order(client_order_id=client_order_id)

@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from polyperps.backtest.bars import Bar
-from polyperps.execution.executor import GateClosed, ShadowRefused
+from polyperps.execution.executor import ExecutorTimeout, GateClosed, ShadowRefused
 from polyperps.execution.live_executor import ShadowExecutor
 from polyperps.execution.order_router import InstrumentRouter, Portfolio, apply_guards
 from polyperps.execution.sim_executor import SimExecutor
@@ -678,3 +678,132 @@ async def test_shadow_records_the_would_be_order_and_halts():
     o = get_order(conn, "r-6-1")
     assert o.status == "shadow_refused" and o.side == "buy" and router.state is State.HALTED
     assert list_decisions(conn, "r", 6)[0].client_order_id == "r-6-1"
+
+
+class PartialThenTimeout(SimExecutor):
+    async def submit(self, order):
+        await super().submit(dc_replace(order, quantity=order.quantity / 2))    # half fills on the venue...
+        raise ExecutorTimeout("ack lost after a partial fill")                  # ...and the ack is lost
+
+
+async def test_partial_fill_then_timeout_is_landed_not_retried():
+    conn, ex, strat, router, pf = make(executor_cls=PartialThenTimeout)
+    await pf.on_bar({6: [bar(0)]}, "run")
+    await pump(pf, ex)
+    assert (await ex.snapshot()).position(6).size == Decimal("0.5")        # one partial, no second order
+    assert "retry" not in kinds(conn) and "ack_lost" in kinds(conn)
+    assert get_order(conn, "r-6-1").filled_quantity == Decimal("0.5")
+
+
+async def test_order_filled_quantity_accumulates_across_fills():
+    conn, ex, strat, router, pf = make(executor_cls=AckOnlyExecutor)
+    await pf.on_bar({6: [bar(0)]}, "run")                                  # r-6-1: quantity 1, no fill yet
+    await router.handle_event(FillUpdate(client_order_id="r-6-1", instrument_id=6, side="buy",
+                                         quantity=Decimal("0.4"), price=Decimal(100), fee=Decimal(0), ts=T0))
+    o = get_order(conn, "r-6-1")
+    assert o.status == "partial" and o.filled_quantity == Decimal("0.4") and router.state is State.OPEN
+    await router.handle_event(FillUpdate(client_order_id="r-6-1", instrument_id=6, side="buy",
+                                         quantity=Decimal("0.6"), price=Decimal(101), fee=Decimal(0), ts=T0))
+    o = get_order(conn, "r-6-1")
+    assert o.status == "filled" and o.filled_quantity == Decimal("1.0") and o.avg_price == Decimal("100.6")
+    assert router.size == 1 and "unexpected_fill" not in kinds(conn)
+
+
+async def test_fill_without_client_id_reaches_its_instruments_router():
+    """Regression pin: Portfolio already routed fills by instrument, so this passed before Task 7.
+    What was missing is LiveReader keeping client-id-less fills (see test_live_executor)."""
+    conn = connect(":memory:")
+    ex = SimExecutor("r", equity=Decimal(1000), taker_fee_rate=FEE, clock=lambda: T0)
+    ex.update_mark(6, Decimal(100)); ex.update_mark(7, Decimal(100))
+    alerter = Alerter("r", [SqliteSink(conn)])
+    r6 = InstrumentRouter(run_id="r", instrument_id=6, category="crypto", strategy=Strat(1), executor=ex, conn=conn,
+                          alerter=alerter, categories=CATS, clock=lambda: T0)
+    r7 = InstrumentRouter(run_id="r", instrument_id=7, category="crypto", strategy=Strat(1), executor=ex, conn=conn,
+                          alerter=alerter, categories=CATS, clock=lambda: T0)
+    pf = Portfolio(run_id="r", executor=ex, conn=conn, alerter=alerter, routers={6: r6, 7: r7})
+    await pf.on_bar({6: [bar(0)], 7: [dc_replace(bar(0), instrument_id=7)]}, "run"); await pump(pf, ex)
+    await pf.dispatch(FillUpdate(client_order_id="venue-999", instrument_id=7, side="sell", quantity=r7.size,
+                                 price=Decimal(85), fee=Decimal(0), ts=T0))            # the venue stop fired
+    assert r7.state is State.FLAT and r6.state is State.OPEN
+    stop = [a for a in list_alerts(conn, "r") if a[2] == "stop_fired"]
+    assert len(stop) == 1 and stop[0][3] == 7
+
+
+class RestingAfterTimeout(AckOnlyExecutor):
+    """The venue still lists the order we gave up on as resting."""
+    cancelled = ()
+
+    async def snapshot(self):
+        return dc_replace(await super().snapshot(), open_orders=("r-6-1",))
+
+    async def cancel(self, client_order_id):
+        self.cancelled = (*self.cancelled, client_order_id)
+
+
+async def test_reconcile_cancels_a_resting_order_we_gave_up_on():
+    """Task 6 review (i): timeout_adopted is terminal, so a venue order with that id is cancelled."""
+    now = [T0]
+    conn, ex, strat, router, pf = make(clock=lambda: now[0], executor_cls=RestingAfterTimeout)
+    await pf.on_bar({6: [bar(0)]}, "run")
+    now[0] = T0 + timedelta(seconds=31)
+    await pf.on_fast({6: Decimal(100)})
+    assert get_order(conn, "r-6-1").status == "timeout_adopted"
+    mismatches = await pf.reconcile_now()
+    assert [m.kind for m in mismatches] == ["unknown_order"] and ex.cancelled == ("r-6-1",)
+
+
+class StopRefused(SimExecutor):
+    async def place_stop(self, instrument_id, trigger_price):
+        raise ShadowRefused("shadow: stop refused")
+
+
+async def test_adopt_survives_a_refused_stop_and_keeps_the_size():
+    """Task 6 review (ii): a refused stop placement is recorded; the adopted size still persists."""
+    now = [T0]
+    conn, ex, strat, router, pf = make(clock=lambda: now[0], executor_cls=StopRefused)
+    await pf.on_bar({6: [bar(0)]}, "run")
+    ex.drain_events()                                    # the fill never reaches us
+    now[0] = T0 + timedelta(seconds=31)
+    await pf.on_fast({6: Decimal(100)})
+    assert router.state is State.OPEN and router.size == 1 and "shadow_refused" in kinds(conn)
+    assert get_positions_local(conn, "r")[6].size == 1
+
+
+class RecoverStrat(Strat):
+    def __init__(self, target=1):
+        super().__init__(target); self.recovered = []
+    def on_recover(self, sign):
+        self.recovered.append(sign)
+
+
+async def test_late_fill_reread_to_zero_cancels_the_stop_and_flattens_the_strategy():
+    """Task 6 review (iii): the late-fill re-read ends like check_pending when the venue is flat."""
+    now = [T0]
+    conn, ex, strat, router, pf = make(clock=lambda: now[0])
+    await pf.on_bar({6: [bar(0)]}, "run")
+    held = ex.drain_events()
+    now[0] = T0 + timedelta(seconds=31)
+    await pf.on_fast({6: Decimal(100)})
+    assert router.size == 1 and 6 in (await ex.snapshot()).stops
+    await ex.submit(OrderRequest(client_order_id="x-1", instrument_id=6, side="sell", quantity=Decimal(1),
+                                 reduce_only=True, ts=T0))
+    ex.drain_events()                                    # closed on the venue; the router never hears of it
+    for ev in held:
+        await pf.dispatch(ev)
+    assert router.state is State.FLAT and router.size == 0 and strat.flattened == 1
+    assert (await ex.snapshot()).stops == {}
+
+
+async def test_late_fill_reread_to_a_position_tells_the_strategy_its_side():
+    """Task 6 review (iii): the order we timed out on lands after all; the strategy learns it is long."""
+    now = [T0]
+    conn, ex, _, router, pf = make(clock=lambda: now[0], executor_cls=AckOnlyExecutor)
+    strat = router.strategy = RecoverStrat(1)
+    await pf.on_bar({6: [bar(0)]}, "run")
+    now[0] = T0 + timedelta(seconds=31)
+    await pf.on_fast({6: Decimal(100)})
+    assert router.state is State.FLAT
+    await SimExecutor.submit(ex, OrderRequest(client_order_id="r-6-1", instrument_id=6, side="buy",
+                                              quantity=Decimal(1), reduce_only=False, ts=T0))
+    await pump(pf, ex)
+    assert router.state is State.OPEN and router.size == 1 and strat.recovered == [1]

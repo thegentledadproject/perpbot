@@ -221,3 +221,24 @@ async def test_submit_rechecks_the_gate_on_every_order():
     with pytest.raises(GateClosed):
         await ex.submit(_req())
     assert not any(c[0] == "place_order" for c in s.calls)
+
+
+async def test_duplicate_order_counts_as_landed_not_rejected():
+    """Review focus 3: a same-id retry answered with duplicate_order is the original order."""
+    s = FakeSession(order_status="duplicate_order")
+    ex = LiveExecutor(s, instrument_ids=[6], modes={}, gate=OPEN, clock=lambda: T0)
+    ack = await ex.submit(_req())
+    assert ack.status == "accepted" and ack.reason == "duplicate_order"
+    s._events = [SimpleNamespace(type="order", timestamp=T0, payload=SimpleNamespace(
+        client_order_id="r-6-1", status="duplicate_order", filled_quantity=Decimal(0)))]
+    assert [e async for e in ex.events()] == []       # must not reach a pending router as "rejected"
+
+
+async def test_fill_without_client_id_is_kept_and_routed_by_instrument():
+    s = FakeSession()
+    s._events = [SimpleNamespace(type="fill", timestamp=T0, payload=[SimpleNamespace(
+        client_order_id=None, order_id=999, instrument_id=7, side="short", quantity=Decimal(1),
+        price=Decimal(85), fee=Decimal(0))])]
+    ex = LiveExecutor(s, instrument_ids=[6], modes={}, gate=OPEN, clock=lambda: T0)
+    (fill,) = [e async for e in ex.events()]
+    assert fill.client_order_id == "venue-999" and fill.instrument_id == 7 and fill.side == "sell"
