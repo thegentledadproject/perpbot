@@ -5,6 +5,7 @@ LIMITS is pre-registered (2026-09-12) and pinned by tests/test_liquidation_guard
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import ROUND_DOWN, Decimal
 from typing import Literal
@@ -60,10 +61,14 @@ def verdict_label(v: Verdict) -> str:
     return f"reject:{v.reason}"
 
 
-def vet_entry(intent: Intent, *, mark: Decimal, snapshot: AccountSnapshot, limits: RiskLimits = LIMITS) -> Verdict:
+def vet_entry(intent: Intent, *, mark: Decimal, snapshot: AccountSnapshot, limits: RiskLimits = LIMITS,
+              pending: Sequence[Intent] = ()) -> Verdict:
+    """`pending`: other instruments' entry orders sent but not yet filled (Part A 4.9); they
+    count like positions so two quick entries cannot share the same headroom."""
     if snapshot.equity <= 0:
         return Reject(reason="equity <= 0")
-    existing = sum((p.notional for p in snapshot.positions), Decimal(0))
+    existing = (sum((p.notional for p in snapshot.positions), Decimal(0))
+                + sum((i.notional for i in pending if not i.reduce_only), Decimal(0)))
     allowed = intent.notional
 
     cap_notional = limits.max_leverage * snapshot.equity - existing

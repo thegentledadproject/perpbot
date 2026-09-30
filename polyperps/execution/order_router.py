@@ -93,6 +93,7 @@ class InstrumentRouter:
         self.cumulative_funding = Decimal(0)
         self._pending_cid: str | None = None
         self._pending_since: datetime | None = None
+        self.pending_intent: Intent | None = None   # the order in flight; counted by other routers' exposure checks
         self._dseq = 0  # decision-row primary-key counter; distinct from self.seq (order count / cid numbering)
         self._last_margin_level: str | None = None   # I5: margin_ratio alerts fire on level transitions only
 
@@ -134,7 +135,8 @@ class InstrumentRouter:
                                                   verdicts=verdicts, intent=intent, client_order_id=cid, note=note))
 
     # --- bar cycle --------------------------------------------------------------
-    async def on_bar(self, history: Sequence[Bar], snapshot: AccountSnapshot, kill: Action) -> None:
+    async def on_bar(self, history: Sequence[Bar], snapshot: AccountSnapshot, kill: Action,
+                     pending: Sequence[Intent] = ()) -> None:
         if self.state in (State.HALTED, State.LIQUIDATED, State.ENTRY_PENDING, State.EXIT_PENDING):
             self._record(target=None, verdicts={}, intent=None, cid=None, note=f"skip:{self.state.value}")
             return
@@ -160,9 +162,9 @@ class InstrumentRouter:
             qty = (self.limits.notional_usd / mark).quantize(_Q, rounding=ROUND_DOWN)
             intent = Intent(instrument_id=self.instrument_id, side=side, quantity=qty, notional=self.limits.notional_usd)
             final, labels = apply_guards(intent, [
-                ("vet_entry", vet_entry(intent, mark=mark, snapshot=snapshot, limits=self.limits)),
+                ("vet_entry", vet_entry(intent, mark=mark, snapshot=snapshot, limits=self.limits, pending=pending)),
                 ("vet_exposure", vet_exposure(intent, positions=snapshot.positions, equity=snapshot.equity,
-                                              categories=self.categories, limits=self.exposure)),
+                                              categories=self.categories, limits=self.exposure, pending=pending)),
             ])
             if final is None:
                 self._record(target=target, verdicts=labels, intent=None, cid=None, note="rejected")
@@ -223,6 +225,7 @@ class InstrumentRouter:
         prior = self.state
         self._pending_cid = cid
         self._pending_since = now
+        self.pending_intent = intent
         self._set_state(State.EXIT_PENDING if intent.reduce_only else State.ENTRY_PENDING)
         # Captured before the await: with a live executor, the event pump can apply this same
         # order's WS fill through handle_event() (updating self.size) while we're still waiting
@@ -506,7 +509,12 @@ class Portfolio:
             for iid, history in histories.items():
                 router = self.routers.get(iid)
                 if router is not None and history:
-                    await router.on_bar(history, snapshot, kill)
+                    # Recomputed per router: an entry sent earlier in THIS loop is in flight too.
+                    # ponytail: an order adopted by recovery (adopt_pending) has no intent and is not
+                    # counted; rebuild one from its order row if recovered in-flight entries matter.
+                    pending = [r.pending_intent for r in self.routers.values()
+                               if r is not router and r.state is State.ENTRY_PENDING and r.pending_intent is not None]
+                    await router.on_bar(history, snapshot, kill, pending=pending)
 
     async def _shutdown(self, snapshot: AccountSnapshot, histories: Mapping[int, Sequence[Bar]]) -> None:
         """Flatten every open position and halt EVERY router, not only the ones whose bar just

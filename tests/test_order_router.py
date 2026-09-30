@@ -807,3 +807,20 @@ async def test_late_fill_reread_to_a_position_tells_the_strategy_its_side():
                                               quantity=Decimal(1), reduce_only=False, ts=T0))
     await pump(pf, ex)
     assert router.state is State.OPEN and router.size == 1 and strat.recovered == [1]
+
+
+async def test_second_router_counts_the_first_routers_in_flight_entry():
+    """Review focus 5: both routers decide in ONE on_bar call; r6's entry is sent but unfilled."""
+    conn = connect(":memory:")
+    ex = AckOnlyExecutor("r", equity=Decimal(200), taker_fee_rate=FEE, clock=lambda: T0)
+    ex.update_mark(6, Decimal(100)); ex.update_mark(7, Decimal(100))
+    alerter = Alerter("r", [SqliteSink(conn)])
+    r6 = InstrumentRouter(run_id="r", instrument_id=6, category="crypto", strategy=Strat(1), executor=ex, conn=conn,
+                          alerter=alerter, categories=CATS, clock=lambda: T0)
+    r7 = InstrumentRouter(run_id="r", instrument_id=7, category="crypto", strategy=Strat(1), executor=ex, conn=conn,
+                          alerter=alerter, categories=CATS, clock=lambda: T0)
+    pf = Portfolio(run_id="r", executor=ex, conn=conn, alerter=alerter, routers={6: r6, 7: r7})
+    await pf.on_bar({6: [bar(0)], 7: [dc_replace(bar(0), instrument_id=7)]}, "run")
+    assert r6.state is State.ENTRY_PENDING and get_order(conn, "r-6-1").quantity == 1
+    # equity 200: cluster net cap 0.6 x 200 = 120; r6's 100 in flight leaves 20 for r7
+    assert get_order(conn, "r-7-1").quantity == Decimal("0.20000000")
