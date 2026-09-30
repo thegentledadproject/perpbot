@@ -16,7 +16,7 @@ from typing import Literal
 
 from polyperps.backtest.bars import Bar
 from polyperps.backtest.strategy import Strategy, clamp_target
-from polyperps.execution.executor import Executor, ExecutorTimeout
+from polyperps.execution.executor import Executor, ExecutorTimeout, ShadowRefused
 from polyperps.execution.reconciliation import Mismatch, diff
 from polyperps.execution.types import (
     AccountSnapshot, DecisionRow, FillUpdate, Intent, OrderAck, OrderRequest, OrderRow, OrderUpdate,
@@ -432,23 +432,29 @@ class Portfolio:
             router = self.routers.get(m.instrument_id) if m.instrument_id is not None else None
             detail = {"local": m.local, "remote": m.remote}
             now = _utcnow()
-            if m.kind == "size":
-                if router is not None:
-                    await router.halt(f"reconcile: size mismatch local={m.local} remote={m.remote}")
-                else:
-                    self.alerter.emit(Alert(level="CRITICAL", kind="unknown_position", instrument_id=m.instrument_id,
+            try:
+                if m.kind == "size":
+                    if router is not None:
+                        await router.halt(f"reconcile: size mismatch local={m.local} remote={m.remote}")
+                    else:
+                        self.alerter.emit(Alert(level="CRITICAL", kind="unknown_position", instrument_id=m.instrument_id,
+                                                detail=detail, ts=now))
+                elif m.kind == "unknown_order":
+                    await self.executor.cancel(m.remote)
+                    self.alerter.emit(Alert(level="WARN", kind="unknown_order", instrument_id=None, detail=detail, ts=now))
+                elif m.kind == "missing_stop":
+                    if router is not None:
+                        await router.replace_stop()
+                    self.alerter.emit(Alert(level="WARN", kind="stop_missing", instrument_id=m.instrument_id, detail=detail, ts=now))
+                elif m.kind == "stop_without_position":
+                    await self.executor.cancel_stop(m.instrument_id)
+                    self.alerter.emit(Alert(level="INFO", kind="stop_orphan_cancelled", instrument_id=m.instrument_id,
                                             detail=detail, ts=now))
-            elif m.kind == "unknown_order":
-                await self.executor.cancel(m.remote)
-                self.alerter.emit(Alert(level="WARN", kind="unknown_order", instrument_id=None, detail=detail, ts=now))
-            elif m.kind == "missing_stop":
-                if router is not None:
-                    await router.replace_stop()
-                self.alerter.emit(Alert(level="WARN", kind="stop_missing", instrument_id=m.instrument_id, detail=detail, ts=now))
-            elif m.kind == "stop_without_position":
-                await self.executor.cancel_stop(m.instrument_id)
-                self.alerter.emit(Alert(level="INFO", kind="stop_orphan_cancelled", instrument_id=m.instrument_id,
+                else:
+                    self.alerter.emit(Alert(level="WARN", kind="stop_drift", instrument_id=m.instrument_id, detail=detail, ts=now))
+            except ShadowRefused:
+                # Shadow mode: the response would have written to the real account. Record it and
+                # keep reconciling (Part A §3.3) instead of taking the reconcile loop down.
+                self.alerter.emit(Alert(level="WARN", kind="shadow_refused", instrument_id=m.instrument_id,
                                         detail=detail, ts=now))
-            else:
-                self.alerter.emit(Alert(level="WARN", kind="stop_drift", instrument_id=m.instrument_id, detail=detail, ts=now))
         return mismatches

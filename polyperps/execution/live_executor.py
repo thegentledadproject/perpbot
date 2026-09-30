@@ -1,8 +1,13 @@
-"""Live executor over polymarket-client's PerpsSession (spec section 4.4).
+"""Live venue access over polymarket-client's PerpsSession (spec section 4.4; Part A §3.3).
 
-The ONLY execution module that imports the SDK. Never run in Phase 2a: the
-constructor calls the three-lock gate for every instrument and raises
-GateClosed unless all are open, and scripts/run_paper.py refuses --executor live.
+The ONLY execution module that imports the SDK. Three classes:
+
+  LiveReader      the read side (snapshot, events, close). No gate: it cannot place anything.
+  LiveExecutor    LiveReader + the write methods. Its constructor calls the three-lock gate for
+                  every instrument and raises GateClosed unless all are open;
+                  scripts/run_trader.py exits 2 while any lock is closed.
+  ShadowExecutor  LiveReader whose writes raise ShadowRefused: the strategy runs against the
+                  real account and every would-be order is recorded, nothing is sent.
 
 SDK verification (2026-09-12, polymarket-client==0.10.0 installed in .venv;
 verified by reading source, never by calling the network):
@@ -47,18 +52,22 @@ import logging
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from polymarket.errors import RequestRejectedError
 from polymarket.models.perps.events import PerpsResyncEvent
 from polymarket.models.perps.requests import PerpsPositionTpSlTrigger
 
-from polyperps.execution.executor import GateClosed
+from polyperps.execution.executor import GateClosed, ShadowRefused
 from polyperps.execution.types import (
     AccountSnapshot, FillUpdate, OrderAck, OrderRequest, OrderStatus, OrderUpdate, PositionView, ReconcileNow,
     StopAck,
 )
 from polyperps.gates import ExecutionMode, GateDecision, live_orders_allowed
+
+if TYPE_CHECKING:
+    from polyperps.backtest.bars import Bar
+    from polyperps.exchange.types import Tick
 
 _log = logging.getLogger(__name__)
 
@@ -104,72 +113,37 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-class LiveExecutor:
-    name = "live"
+async def open_session(label: str) -> tuple[Any, Any]:
+    """(sdk client, perps session) for the wallet in POLYMARKET_PRIVATE_KEY; the caller closes
+    both. Signs with the real wallet, so no test ever calls it."""
+    from polymarket import AsyncSecureClient
 
-    def __init__(
-        self,
-        session: Any,
-        *,
-        instrument_ids: Sequence[int],
-        modes: Mapping[int, ExecutionMode],
-        gate: Callable[[int], GateDecision] | None = None,
-        clock: Callable[[], datetime] = _utcnow,
-        dead_man_s: int = 60,
-    ) -> None:
-        if not instrument_ids:
-            raise GateClosed("no instruments to gate")
-        check = gate if gate is not None else (lambda iid: live_orders_allowed(iid, modes=modes))
-        for iid in instrument_ids:
-            d = check(iid)
-            if not d.allowed:
-                raise GateClosed(f"instrument {iid}: {d.reason}")
+    from polyperps.security.key_management import load_secret
+
+    client = await AsyncSecureClient.create(private_key=load_secret("POLYMARKET_PRIVATE_KEY"))
+    return client, await client.open_perps_session(label=label)
+
+
+class LiveReader:
+    """Read side of the live account. No gate: nothing here can place, cancel or arm anything."""
+
+    name = "live-reader"
+
+    def __init__(self, session: Any, *, clock: Callable[[], datetime] = _utcnow) -> None:
         self._s = session
         self._clock = clock
-        self._dead_man = timedelta(seconds=dead_man_s)
         self._stop_ids: dict[int, int] = {}
+        self.start_equity: Decimal | None = None   # loss-limit baseline; set by the runner
 
-    async def submit(self, order: OrderRequest) -> OrderAck:
-        try:
-            placement = await self._s.place_order(
-                instrument_id=order.instrument_id, side=_ORDER_SIDE_MAP[order.side], quantity=order.quantity,
-                time_in_force="ioc", reduce_only=order.reduce_only, client_order_id=order.client_order_id)
-        except RequestRejectedError as exc:
-            return OrderAck(client_order_id=order.client_order_id, exchange_order_id=None, status="rejected",
-                            reason=str(exc), ts=self._clock())
-        placed = getattr(placement, "order", None)
-        xid = getattr(placed, "id", None)
-        exchange_order_id = str(xid) if xid is not None else None
-        raw_status = getattr(placed, "status", None)
-        mapped = _SDK_ORDER_STATUS.get(raw_status, _UNMAPPED)
-        if mapped is _UNMAPPED:
-            return OrderAck(client_order_id=order.client_order_id, exchange_order_id=exchange_order_id,
-                            status="rejected", reason=f"unknown status {raw_status}", ts=self._clock())
-        if mapped in ("rejected", "cancelled", "auto_cancelled"):
-            return OrderAck(client_order_id=order.client_order_id, exchange_order_id=exchange_order_id,
-                            status="rejected", reason=str(raw_status), ts=self._clock())
-        return OrderAck(client_order_id=order.client_order_id, exchange_order_id=exchange_order_id,
-                        status="accepted", reason="", ts=self._clock())
+    # --- runner hooks: the venue owns marks, funding and stop triggers -------
+    def on_tick(self, tick: Tick) -> None:
+        return None
 
-    async def cancel(self, client_order_id: str) -> None:
-        await self._s.cancel_order(client_order_id=client_order_id)
+    def on_bar(self, bar: Bar) -> None:
+        return None
 
-    async def place_stop(self, instrument_id: int, trigger_price: Decimal) -> StopAck:
-        placed = await self._s.place_position_tp_sl(
-            instrument_id=instrument_id, stop_loss=PerpsPositionTpSlTrigger(trigger_price=trigger_price))
-        oid = getattr(getattr(placed, "stop_loss", None), "order_id", None)
-        if oid is not None:
-            self._stop_ids[instrument_id] = int(oid)
-        return StopAck(instrument_id=instrument_id, trigger_price=trigger_price,
-                       exchange_order_id=str(oid) if oid is not None else None, ts=self._clock())
-
-    async def cancel_stop(self, instrument_id: int) -> None:
-        oid = self._stop_ids.pop(instrument_id, None)
-        if oid is not None:
-            await self._s.cancel_order(order_id=oid)
-
-    async def heartbeat(self) -> None:
-        await self._s.arm_auto_cancel(cancel_at=self._clock() + self._dead_man)
+    def poll_fills(self) -> list[FillUpdate]:
+        return []
 
     async def snapshot(self) -> AccountSnapshot:
         pf = await self._s.fetch_portfolio()
@@ -213,3 +187,92 @@ class LiveExecutor:
 
     async def close(self) -> None:
         await self._s.close()
+
+
+class LiveExecutor(LiveReader):
+    name = "live"
+
+    def __init__(
+        self,
+        session: Any,
+        *,
+        instrument_ids: Sequence[int],
+        modes: Mapping[int, ExecutionMode],
+        gate: Callable[[int], GateDecision] | None = None,
+        clock: Callable[[], datetime] = _utcnow,
+        dead_man_s: int = 60,
+    ) -> None:
+        if not instrument_ids:
+            raise GateClosed("no instruments to gate")
+        check = gate if gate is not None else (lambda iid: live_orders_allowed(iid, modes=modes))
+        for iid in instrument_ids:
+            d = check(iid)
+            if not d.allowed:
+                raise GateClosed(f"instrument {iid}: {d.reason}")
+        super().__init__(session, clock=clock)
+        self._dead_man = timedelta(seconds=dead_man_s)
+
+    async def submit(self, order: OrderRequest) -> OrderAck:
+        try:
+            placement = await self._s.place_order(
+                instrument_id=order.instrument_id, side=_ORDER_SIDE_MAP[order.side], quantity=order.quantity,
+                time_in_force="ioc", reduce_only=order.reduce_only, client_order_id=order.client_order_id)
+        except RequestRejectedError as exc:
+            return OrderAck(client_order_id=order.client_order_id, exchange_order_id=None, status="rejected",
+                            reason=str(exc), ts=self._clock())
+        placed = getattr(placement, "order", None)
+        xid = getattr(placed, "id", None)
+        exchange_order_id = str(xid) if xid is not None else None
+        raw_status = getattr(placed, "status", None)
+        mapped = _SDK_ORDER_STATUS.get(raw_status, _UNMAPPED)
+        if mapped is _UNMAPPED:
+            return OrderAck(client_order_id=order.client_order_id, exchange_order_id=exchange_order_id,
+                            status="rejected", reason=f"unknown status {raw_status}", ts=self._clock())
+        if mapped in ("rejected", "cancelled", "auto_cancelled"):
+            return OrderAck(client_order_id=order.client_order_id, exchange_order_id=exchange_order_id,
+                            status="rejected", reason=str(raw_status), ts=self._clock())
+        return OrderAck(client_order_id=order.client_order_id, exchange_order_id=exchange_order_id,
+                        status="accepted", reason="", ts=self._clock())
+
+    async def cancel(self, client_order_id: str) -> None:
+        await self._s.cancel_order(client_order_id=client_order_id)
+
+    async def place_stop(self, instrument_id: int, trigger_price: Decimal) -> StopAck:
+        placed = await self._s.place_position_tp_sl(
+            instrument_id=instrument_id, stop_loss=PerpsPositionTpSlTrigger(trigger_price=trigger_price))
+        oid = getattr(getattr(placed, "stop_loss", None), "order_id", None)
+        if oid is not None:
+            self._stop_ids[instrument_id] = int(oid)
+        return StopAck(instrument_id=instrument_id, trigger_price=trigger_price,
+                       exchange_order_id=str(oid) if oid is not None else None, ts=self._clock())
+
+    async def cancel_stop(self, instrument_id: int) -> None:
+        oid = self._stop_ids.pop(instrument_id, None)
+        if oid is not None:
+            await self._s.cancel_order(order_id=oid)
+
+    async def heartbeat(self) -> None:
+        await self._s.arm_auto_cancel(cancel_at=self._clock() + self._dead_man)
+
+
+class ShadowExecutor(LiveReader):
+    """Part A §3.3: the real account, read-only. Every write raises ShadowRefused (the router
+    records the order as shadow_refused and halts the instrument); heartbeat is a no-op because
+    shadow never has an order to protect."""
+
+    name = "shadow"
+
+    async def submit(self, order: OrderRequest) -> OrderAck:
+        raise ShadowRefused(f"shadow: submit {order.client_order_id} refused")
+
+    async def cancel(self, client_order_id: str) -> None:
+        raise ShadowRefused(f"shadow: cancel {client_order_id} refused")
+
+    async def place_stop(self, instrument_id: int, trigger_price: Decimal) -> StopAck:
+        raise ShadowRefused(f"shadow: stop for {instrument_id} at {trigger_price} refused")
+
+    async def cancel_stop(self, instrument_id: int) -> None:
+        raise ShadowRefused(f"shadow: cancel stop for {instrument_id} refused")
+
+    async def heartbeat(self) -> None:
+        return None

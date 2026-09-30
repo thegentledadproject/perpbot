@@ -4,6 +4,8 @@ from decimal import Decimal
 
 import pytest
 
+from polyperps.backtest.bars import Bar
+from polyperps.exchange.types import SourceType, Tick
 from polyperps.execution.executor import ExecutorTimeout
 from polyperps.execution.sim_executor import MAINTENANCE_RATE, SimExecutor
 from polyperps.execution.types import FillUpdate, OrderRequest, OrderUpdate
@@ -135,3 +137,30 @@ async def test_start_equity_survives_persistence_and_trading():
     restored = SimExecutor.from_json("run1", saved[-1], taker_fee_rate=FEE, clock=lambda: T0)
     assert restored.start_equity == Decimal(1000)
     assert (await restored.snapshot()).equity != Decimal(1000)   # cash moved; the baseline did not
+
+
+def _tick(mark):
+    return Tick(instrument_id=6, mark_price=Decimal(mark), index_price=Decimal(mark), last_price=Decimal(mark),
+                funding_rate=Decimal("0.001"), next_funding=T0, exchange_ts=T0, received_ts=T0,
+                source_type=SourceType.POLYMARKET_WS)
+
+
+def _bar(rate):
+    c = Decimal(100)
+    return Bar(instrument_id=6, source_type=SourceType.POLYMARKET_WS, open_ts=T0, open=c, high=c, low=c, close=c,
+               index_close=None, funding_rate=None if rate is None else Decimal(rate), spread_bps=Decimal(5),
+               spread_source="constant", complete=True)
+
+
+async def test_executor_hooks_drive_marks_funding_and_stops():
+    ex = make()
+    await ex.submit(req())
+    ex.drain_events()
+    ex.on_tick(_tick("100"))
+    ex.on_bar(_bar("0.001"))               # long pays 1 * 100 * 0.001
+    ex.on_bar(_bar(None))                  # a bar without a rate pays nothing
+    assert (await ex.snapshot()).position(6).cumulative_funding == Decimal("-0.1")
+    await ex.place_stop(6, Decimal(85))
+    ex.on_tick(_tick("84"))
+    fills = ex.poll_fills()
+    assert len(fills) == 1 and fills[0].side == "sell"

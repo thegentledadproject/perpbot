@@ -4,8 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from polyperps.execution.executor import GateClosed
-from polyperps.execution.live_executor import LiveExecutor
+from polyperps.execution.executor import GateClosed, ShadowRefused
+from polyperps.execution.live_executor import LiveExecutor, LiveReader, ShadowExecutor
 from polyperps.execution.types import FillUpdate, OrderRequest, OrderUpdate, ReconcileNow
 from polyperps.gates import ExecutionMode, GateDecision
 
@@ -177,3 +177,36 @@ async def test_events_order_status_mapping():
     out = [e async for e in ex.events()]
     assert len(out) == 1
     assert isinstance(out[0], OrderUpdate) and out[0].status == "rejected"
+
+
+def _req(cid="r-6-1"):
+    return OrderRequest(client_order_id=cid, instrument_id=6, side="buy", quantity=Decimal(1), reduce_only=False, ts=T0)
+
+
+async def test_shadow_refuses_every_write_and_sends_nothing():
+    s = FakeSession()
+    ex = ShadowExecutor(s, clock=lambda: T0)
+    with pytest.raises(ShadowRefused):
+        await ex.submit(_req())
+    with pytest.raises(ShadowRefused):
+        await ex.cancel("r-6-1")
+    with pytest.raises(ShadowRefused):
+        await ex.place_stop(6, Decimal(85))
+    with pytest.raises(ShadowRefused):
+        await ex.cancel_stop(6)
+    await ex.heartbeat()                       # nothing to keep alive: shadow never has orders
+    assert s.calls == []
+
+
+async def test_shadow_reads_the_real_account_without_a_gate():
+    ex = ShadowExecutor(FakeSession(), clock=lambda: T0)   # no gate argument: construction never checks locks
+    snap = await ex.snapshot()
+    assert snap.position(6).size == Decimal("0.5") and snap.stops == {6: Decimal(85)}
+    assert ex.name == "shadow" and ex.start_equity is None and ex.poll_fills() == []
+    assert ex.on_tick(None) is None and ex.on_bar(None) is None
+
+
+def test_live_executor_is_a_gated_live_reader():
+    assert issubclass(LiveExecutor, LiveReader) and issubclass(ShadowExecutor, LiveReader)
+    with pytest.raises(GateClosed):
+        LiveExecutor(FakeSession(), instrument_ids=[6], modes={}, gate=lambda iid: GateDecision(False, "closed"))

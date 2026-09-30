@@ -1,8 +1,10 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 
 from polyperps.backtest.bars import Bar
 from polyperps.execution.order_router import InstrumentRouter, Portfolio
+from polyperps.execution.live_executor import ShadowExecutor
 from polyperps.execution.reconciliation import Mismatch, diff
 from polyperps.execution.sim_executor import SimExecutor
 from polyperps.execution.types import AccountSnapshot, PositionLocalRow, PositionView, State
@@ -118,3 +120,24 @@ async def test_reconcile_size_mismatch_halt_is_idempotent():
     assert router.state is State.HALTED
     halted_alerts = [a for a in list_alerts(conn, "r") if a[2] == "halted"]
     assert len(halted_alerts) == 1
+
+
+class AlienOrderAccount:
+    """A real account (as the perps session sees it) with one order this run never placed."""
+    async def fetch_portfolio(self):
+        return SimpleNamespace(positions=(), margin=SimpleNamespace(total_account_value=Decimal(1000)),
+                               in_liquidation=False)
+
+    async def fetch_open_orders(self):
+        return (SimpleNamespace(client_order_id="alien-1", id=5, tp_sl=None, instrument_id=6),)
+
+
+async def test_reconcile_in_shadow_records_refused_writes_and_keeps_running():
+    conn = connect(":memory:")
+    ex = ShadowExecutor(AlienOrderAccount(), clock=lambda: T0)
+    alerter = Alerter("r", [SqliteSink(conn)])
+    pf = Portfolio(run_id="r", executor=ex, conn=conn, alerter=alerter, routers={})
+    ms = await pf.reconcile_now()             # must not raise: the reconcile loop keeps running
+    assert [m.kind for m in ms] == ["unknown_order"]
+    kinds = [a[2] for a in list_alerts(conn, "r")]
+    assert "shadow_refused" in kinds and "unknown_order" not in kinds

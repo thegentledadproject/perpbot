@@ -10,7 +10,7 @@ import json
 from collections.abc import AsyncIterator, Callable
 from datetime import datetime, timezone
 from decimal import ROUND_HALF_EVEN, Decimal
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from polyperps.execution.executor import ExecutorTimeout
 from polyperps.execution.types import (
@@ -18,6 +18,10 @@ from polyperps.execution.types import (
 )
 from polyperps.risk.liquidation_guard import LIMITS
 from polyperps.signal.sufficiency import BAR
+
+if TYPE_CHECKING:
+    from polyperps.backtest.bars import Bar
+    from polyperps.exchange.types import Tick
 
 MAINTENANCE_RATE = LIMITS.maintenance_rate
 _BPS = Decimal(10_000)
@@ -79,6 +83,17 @@ class SimExecutor:
         p.funding += paid
         self._cash += paid
         self._save()
+
+    # --- runner hooks (Part A §3.2) ----------------------------------------
+    def on_tick(self, tick: Tick) -> None:
+        self.update_mark(tick.instrument_id, tick.mark_price)
+
+    def on_bar(self, bar: Bar) -> None:
+        if bar.funding_rate is not None:
+            self.apply_funding(bar.instrument_id, bar.funding_rate)
+
+    def poll_fills(self) -> list[FillUpdate]:
+        return self.check_triggers()
 
     # --- executor protocol ------------------------------------------------
     async def submit(self, order: OrderRequest) -> OrderAck:
