@@ -37,6 +37,9 @@ for unit in polyperps-feed.service polyperps-paper.service polyperps-dashboard.s
   fi
 done
 
+mkdir -p /etc/needrestart/conf.d
+cp deploy/needrestart-polyperps.conf /etc/needrestart/conf.d/polyperps.conf
+
 systemctl enable --now polyperps-prune.timer
 systemctl enable --now polyperps-backfill.timer
 systemctl restart polyperps-feed polyperps-paper polyperps-dashboard

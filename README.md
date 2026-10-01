@@ -181,6 +181,11 @@ alerts table only; Telegram is CRITICAL-only). Alerts go to the journal
 (`journalctl -u polyperps-health`), the `alerts` table (run_id `ops-health`) and Telegram
 when configured. Without Telegram, nobody is paged.
 
+**Auto-updates**: unattended-upgrades keeps patching the OS, but
+`/etc/needrestart/conf.d/polyperps.conf` (from `deploy/needrestart-polyperps.conf`) stops it from
+restarting `polyperps-*` units. They pick up patched libraries on the next deploy, so deploy (or
+restart them deliberately) after a security update you care about.
+
 **Backfill**: `polyperps-backfill.timer` runs `scripts/backfill.py --days 1 --interval 1h` at 5 past
 every hour, storing closed 1h candles and funding so a restarted paper run seeds its strategy
 history instead of re-warming from zero. Only closed candles are stored (inserts never overwrite).

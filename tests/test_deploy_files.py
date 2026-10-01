@@ -19,7 +19,7 @@ SHELL_FILES = ["bootstrap.sh", "update.sh"]
 # 5.1 does not require CRLF, and the repo standardizes on LF everywhere.
 LF_ONLY_FILES = UNIT_FILES + ["env.example"] + SHELL_FILES + ["deploy.ps1", "polyperps-health.service", "polyperps-health.timer",
                                                                               "polyperps-prune.service", "polyperps-prune.timer",
-                                                                              "polyperps-backfill.service", "polyperps-backfill.timer"]
+                                                                              "polyperps-backfill.service", "polyperps-backfill.timer", "needrestart-polyperps.conf"]
 
 LIVE_EXECUTOR_RE = re.compile(r"--executor\s+live")
 
@@ -147,3 +147,10 @@ def test_backfill_timer_is_wired():
     assert "OnCalendar=*:05" in _read("polyperps-backfill.timer")
     for name in ("bootstrap.sh", "update.sh"):
         assert "polyperps-backfill.timer" in _read(name)
+
+
+def test_needrestart_never_restarts_polyperps_units():
+    conf = _read("needrestart-polyperps.conf")
+    assert "$nrconf{override_rc}{qr(^polyperps-)} = 0;" in conf
+    for name in ("bootstrap.sh", "update.sh"):
+        assert "/etc/needrestart/conf.d/polyperps.conf" in _read(name)
