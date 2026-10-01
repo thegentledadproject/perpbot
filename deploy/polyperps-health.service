@@ -1,5 +1,5 @@
 [Unit]
-Description=polyperps ops health check (disk, tick freshness, unit restarts, prune result)
+Description=polyperps ops health check (disk, tick freshness, unit restarts, prune and backfill results)
 
 [Service]
 Type=oneshot

@@ -1,0 +1,20 @@
+[Unit]
+Description=polyperps hourly backfill of closed 1h candles and funding (strategy warm-up history)
+# A failed backfill is checked (and alerted) right away.
+OnFailure=polyperps-health.service
+
+[Service]
+Type=oneshot
+User=polyperps
+Group=polyperps
+WorkingDirectory=/opt/polyperps
+EnvironmentFile=/etc/polyperps/env
+ExecStart=/opt/polyperps/.venv/bin/python scripts/backfill.py --days 1 --interval 1h
+TimeoutStartSec=10min
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/polyperps
+StandardOutput=journal
+StandardError=journal

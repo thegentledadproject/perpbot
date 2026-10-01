@@ -174,12 +174,21 @@ Refuses to run against a dirty working tree or an unpushed commit.
 tails the last 40 lines of both units after every deploy.
 
 **Health check**: `polyperps-health.timer` runs `scripts/healthcheck.py` every 5 minutes
-(and right after any failed prune). It alerts CRITICAL, once per problem, on: disk ≥95 %,
+(and right after any failed prune or backfill). It alerts CRITICAL, once per problem, on: disk ≥95 %,
 newest tick older than 5 minutes, feed/paper not active or restarted by systemd, or a
-failed prune; and INFO when the problem clears ("recovered" notices go to the journal and
+failed prune or backfill; and INFO when the problem clears ("recovered" notices go to the journal and
 alerts table only; Telegram is CRITICAL-only). Alerts go to the journal
 (`journalctl -u polyperps-health`), the `alerts` table (run_id `ops-health`) and Telegram
 when configured. Without Telegram, nobody is paged.
+
+**Auto-updates**: unattended-upgrades keeps patching the OS, but
+`/etc/needrestart/conf.d/polyperps.conf` (from `deploy/needrestart-polyperps.conf`) stops it from
+restarting `polyperps-*` units. They pick up patched libraries on the next deploy, so deploy (or
+restart them deliberately) after a security update you care about.
+
+**Backfill**: `polyperps-backfill.timer` runs `scripts/backfill.py --days 1 --interval 1h` at 5 past
+every hour, storing closed 1h candles and funding so a restarted paper run seeds its strategy
+history instead of re-warming from zero. Only closed candles are stored (inserts never overwrite).
 
 **Stopping**: `systemctl stop polyperps-feed polyperps-paper` sends SIGTERM;
 both scripts unwind through their `finally` block cleanly (see the soak

@@ -70,14 +70,19 @@ fi
 echo "== systemd units =="
 # Gate the copy on content so a re-run of bootstrap.sh doesn't clobber an
 # operator's local edits to the installed units.
-for unit in polyperps-feed.service polyperps-paper.service polyperps-dashboard.service polyperps-prune.service polyperps-prune.timer polyperps-health.service polyperps-health.timer; do
+for unit in polyperps-feed.service polyperps-paper.service polyperps-dashboard.service polyperps-prune.service polyperps-prune.timer polyperps-health.service polyperps-health.timer polyperps-backfill.service polyperps-backfill.timer; do
   if ! cmp -s "/opt/polyperps/deploy/${unit}" "/etc/systemd/system/${unit}"; then
     cp "/opt/polyperps/deploy/${unit}" "/etc/systemd/system/${unit}"
     systemctl daemon-reload
   fi
 done
+
+mkdir -p /etc/needrestart/conf.d
+cp /opt/polyperps/deploy/needrestart-polyperps.conf /etc/needrestart/conf.d/polyperps.conf
+
 systemctl enable polyperps-feed polyperps-paper polyperps-dashboard
 systemctl enable --now polyperps-prune.timer
+systemctl enable --now polyperps-backfill.timer
 systemctl enable polyperps-health.timer   # started with the services in step 4
 
 cat <<'EOF'

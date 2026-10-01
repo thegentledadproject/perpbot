@@ -30,6 +30,7 @@ from datetime import datetime, timedelta, timezone
 from polyperps.config import load_settings
 from polyperps.data_ingest.intervals import parse_interval
 from polyperps.exchange.client import TRANSIENT_ERRORS, PolymarketPerpsClient, retry_after_seconds
+from polyperps.exchange.types import Candle
 from polyperps.storage import db
 from polyperps.storage.gaps import find_gaps
 
@@ -42,6 +43,12 @@ _MAX_ATTEMPTS = 3
 _RETRY_SLEEP_S = 60
 
 
+def closed(candles: list[Candle], now: datetime) -> list[Candle]:
+    """Only candles whose interval has ended. db.insert_candle is INSERT OR IGNORE, so a candle
+    stored while its interval is still open would stay half-built forever."""
+    return [c for c in candles if c.open_ts + parse_interval(c.interval) <= now]
+
+
 async def _fetch_window(
     client: PolymarketPerpsClient,
     conn,
@@ -49,6 +56,7 @@ async def _fetch_window(
     interval: str,
     w_start: datetime,
     w_end: datetime,
+    now: datetime,
 ) -> tuple[int, int]:
     """Fetch+insert one window's funding and candles, retrying transient failures only."""
     for attempt in range(1, _MAX_ATTEMPTS + 1):
@@ -59,7 +67,7 @@ async def _fetch_window(
             )
             n_c = sum(
                 db.insert_candle(conn, c)
-                for c in await client.fetch_candles(iid, interval=interval, start=w_start, end=w_end)
+                for c in closed(await client.fetch_candles(iid, interval=interval, start=w_start, end=w_end), now)
             )
             return n_f, n_c
         except TRANSIENT_ERRORS as exc:
@@ -91,6 +99,7 @@ async def main() -> None:
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=args.days)
     aborted = False
+    any_failed = False
     try:
         instruments = {i.instrument_id: i for i in await client.fetch_instruments()}
         for iid in settings.instrument_ids:
@@ -104,7 +113,7 @@ async def main() -> None:
             while w_start < end:
                 w_end = min(w_start + timedelta(days=1), end)
                 try:
-                    wf, wc = await _fetch_window(client, conn, iid, args.interval, w_start, w_end)
+                    wf, wc = await _fetch_window(client, conn, iid, args.interval, w_start, w_end, end)
                     n_f += wf
                     n_c += wc
                 except RuntimeError:
@@ -148,13 +157,14 @@ async def main() -> None:
                 print("  candles: no gaps")
 
             if failed_windows:
+                any_failed = True
                 print(f"  windows NOT backfilled ({len(failed_windows)}):")
                 for a, b in failed_windows:
                     print(f"    {a.isoformat()} -> {b.isoformat()}")
     finally:
         await client.close()
         conn.close()
-    if aborted:
+    if aborted or any_failed:
         raise SystemExit(1)
 
 
