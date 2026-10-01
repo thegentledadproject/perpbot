@@ -207,3 +207,57 @@ async def test_reconcile_in_shadow_records_a_refused_missing_stop():
     assert "missing_stop" in [m.kind for m in ms]
     alerts = [(a[1], a[2]) for a in list_alerts(conn, "r")]
     assert ("WARN", "shadow_refused") in alerts and "stop_placed" not in [k for _, k in alerts]
+
+
+class OrphanStopAccount(AlienOrderAccount):
+    """A real account with a venue stop on 6 but no position."""
+    async def fetch_open_orders(self):
+        sl = SimpleNamespace(kind="sl", trigger_price=Decimal(90))
+        return (SimpleNamespace(client_order_id="r-x", id=7, tp_sl=sl, instrument_id=6),)
+
+
+def _shadow_pf(account):
+    conn = connect(":memory:")
+    pf = Portfolio(run_id="r", executor=ShadowExecutor(account, clock=lambda: T0), conn=conn,
+                   alerter=Alerter("r", [SqliteSink(conn)]), routers={})
+    return conn, pf
+
+
+async def test_shadow_orphan_stop_is_a_refused_cancel_not_a_cancelled_stop():
+    conn, pf = _shadow_pf(OrphanStopAccount())
+    await pf.reconcile_now()
+    alerts = list_alerts(conn, "r")
+    assert [a[2] for a in alerts] == ["shadow_refused"] and alerts[0][1] == "WARN"
+    assert "cancel_stop" in str(alerts[0])
+
+
+async def test_shadow_refused_is_reported_once_per_persisting_mismatch():
+    conn, pf = _shadow_pf(AlienOrderAccount())
+    await pf.reconcile_now()
+    await pf.reconcile_now()
+    assert [a[2] for a in list_alerts(conn, "r")].count("shadow_refused") == 1
+
+
+async def test_shadow_refused_realerts_after_the_mismatch_clears_and_returns():
+    class Flip(AlienOrderAccount):
+        present = True
+
+        async def fetch_open_orders(self):
+            return (await super().fetch_open_orders()) if self.present else ()
+
+    acct = Flip()
+    conn, pf = _shadow_pf(acct)
+    await pf.reconcile_now()
+    acct.present = False
+    await pf.reconcile_now()
+    acct.present = True
+    await pf.reconcile_now()
+    assert [a[2] for a in list_alerts(conn, "r")].count("shadow_refused") == 2
+
+
+async def test_non_shadow_orphan_stop_is_still_cancelled():
+    conn, ex, router, pf = await make_open()
+    ex._stops[99] = Decimal(50)
+    ms = await pf.reconcile_now()
+    assert "stop_without_position" in [m.kind for m in ms]
+    assert "stop_orphan_cancelled" in [a[2] for a in list_alerts(conn, "r")]

@@ -83,10 +83,22 @@ def _alerter(run_id: str, conn) -> Alerter:
     return Alerter(run_id, default_sinks(conn))
 
 
+def refuse_foreign_run_id(conn, run_id: str, name: str) -> None:
+    """Exit 2 if run_id's rows belong to a different executor than `name`."""
+    prev = db.load_account_snapshot(conn, run_id)
+    owner = prev[2] if prev is not None else ("sim" if db.load_sim_account(conn, run_id) else None)
+    if owner is not None and owner != name:
+        # Its rows, baseline and halts belong to another account; adopting them would be wrong.
+        print(f"--executor {name} refused: run_id {run_id!r} already belongs to the {owner} executor; "
+              f"pick a new --run-id", file=sys.stderr)
+        raise SystemExit(2)
+
+
 async def build_executor(mode: str, *, run_id: str, conn, fee_rate: Decimal, equity: Decimal,
                          instrument_ids: Sequence[int], session: Any = None) -> Executor:
     """sim: the paper account from the DB (or a fresh one). shadow/live: the real account through
     `session`; live raises GateClosed unless all three locks are open for every instrument."""
+    refuse_foreign_run_id(conn, run_id, mode)
     if mode == "sim":
         saved = db.load_sim_account(conn, run_id)
 
@@ -99,12 +111,6 @@ async def build_executor(mode: str, *, run_id: str, conn, fee_rate: Decimal, equ
     ex = (ShadowExecutor(session) if mode == "shadow"
           else LiveExecutor(session, instrument_ids=instrument_ids, modes=MODES))
     prev = db.load_account_snapshot(conn, run_id)
-    owner = prev[2] if prev is not None else ("sim" if db.load_sim_account(conn, run_id) else None)
-    if owner is not None and owner != ex.name:
-        # Its rows, baseline and halts belong to another account; adopting them would be wrong.
-        print(f"--executor {mode} refused: run_id {run_id!r} already belongs to the {owner} executor; "
-              f"pick a new --run-id", file=sys.stderr)
-        raise SystemExit(2)
     # The loss-limit baseline must survive restarts, or a restart after -9 % would reset it.
     if prev is not None:
         ex.start_equity = prev[1]
@@ -181,6 +187,7 @@ async def run_once(args, settings) -> None:
     sdk = session = ticks = None
     try:
         if args.executor != "sim":
+            refuse_foreign_run_id(conn, run_id, args.executor)   # before the wallet key is loaded
             sdk, session = await open_session(f"polyperps-{args.executor}")
         try:
             executor = await build_executor(args.executor, run_id=run_id, conn=conn, fee_rate=fee.taker_fee_rate,
