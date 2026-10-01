@@ -142,9 +142,19 @@ def test_query_last_index_by_hour_same_timestamp_tie_is_one_value():
     assert list(out) == [T0] and out[T0] in (Decimal("100"), Decimal("101"))
 
 
-def test_query_last_index_by_hour_reduces_in_sql():
-    """The reduction happens in SQLite (GROUP BY hour), not by iterating every tick in Python."""
+def test_query_last_index_by_hour_uses_one_indexed_seek_per_hour():
+    """One ticks_by_time seek per hour (LIMIT 1), not a read of every tick in the window."""
     import inspect
 
     import polyperps.storage.db as dbmod
-    assert "GROUP BY" in inspect.getsource(dbmod.query_last_index_by_hour)
+    src = inspect.getsource(dbmod.query_last_index_by_hour)
+    assert "INDEXED BY ticks_by_time" in src and "LIMIT 1" in src
+
+
+def test_query_last_index_by_hour_window_starting_and_ending_mid_hour():
+    conn = connect(":memory:")
+    for ts, px in [(T0 + timedelta(minutes=10), "100"), (T0 + timedelta(minutes=50), "101"),
+                   (T0 + H + timedelta(minutes=5), "102"), (T0 + H + timedelta(minutes=40), "103")]:
+        insert_tick(conn, _tick(ts, px))
+    out = query_last_index_by_hour(conn, 6, start=T0 + timedelta(minutes=20), end=T0 + H + timedelta(minutes=30))
+    assert out == {T0: Decimal("101"), T0 + H: Decimal("102")}

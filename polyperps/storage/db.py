@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -316,21 +316,26 @@ _NATIVE_TICK_SOURCES = (SourceType.POLYMARKET_WS.value, SourceType.POLYMARKET_RE
 def query_last_index_by_hour(
     conn: sqlite3.Connection, instrument_id: int, *, start: datetime, end: datetime
 ) -> dict[datetime, Decimal]:
-    """Last native index_price per hour in [start, end], reduced in SQLite: one row per hour
-    comes back instead of every tick (millions per day; the Python loop took ~3 min per
-    instrument at every paper restart). exchange_ts is UTC ISO text from _ts(), so its first
-    13 chars ('YYYY-MM-DDTHH') are the hour; SQLite returns the bare index_price from the row
-    holding MAX(exchange_ts)."""
-    # ponytail: ties on the hour's last exchange_ts pick either row (the old loop broke ties by
-    # sequence); add sequence to the reduction if same-timestamp ticks ever disagree in practice.
-    cur = conn.execute(
-        "SELECT substr(exchange_ts, 1, 13) AS hour, index_price, MAX(exchange_ts) FROM ticks "
-        "WHERE instrument_id=? AND source_type IN (?, ?) AND exchange_ts BETWEEN ? AND ? "
-        "GROUP BY hour",
-        (instrument_id, *_NATIVE_TICK_SOURCES, _ts(start), _ts(end)),
-    )
-    return {datetime.fromisoformat(hour + ":00:00+00:00"): Decimal(index_price)
-            for hour, index_price, _ in cur}
+    """Last native index_price per hour in [start, end]: one seek per hour on ticks_by_time
+    (the hour's newest tick), never a read of every tick. Reading all rows -- in Python or with
+    GROUP BY -- took ~3 min per instrument at every paper restart on the box (I/O-bound,
+    ~3.3M rows); the seeks take ~0.2 s for 72 hours."""
+    # ponytail: ties on the hour's newest exchange_ts pick either row (no sequence tie-break,
+    # which would force reading the whole hour); add one if same-timestamp ticks ever disagree.
+    out: dict[datetime, Decimal] = {}
+    hour = _floor_hour(start)
+    while hour <= end:
+        lo, hi = max(hour, start), min(hour + timedelta(hours=1) - timedelta(microseconds=1), end)
+        row = conn.execute(
+            "SELECT index_price FROM ticks INDEXED BY ticks_by_time "
+            "WHERE instrument_id=? AND exchange_ts BETWEEN ? AND ? AND source_type IN (?, ?) "
+            "ORDER BY exchange_ts DESC LIMIT 1",
+            (instrument_id, _ts(lo), _ts(hi), *_NATIVE_TICK_SOURCES),
+        ).fetchone()
+        if row is not None:
+            out[hour] = Decimal(row[0])
+        hour += timedelta(hours=1)
+    return out
 
 
 def _spread_bps(bids_json: str, asks_json: str) -> Decimal | None:
