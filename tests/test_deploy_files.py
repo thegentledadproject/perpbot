@@ -18,7 +18,8 @@ SHELL_FILES = ["bootstrap.sh", "update.sh"]
 # All deploy files must be plain LF text, deploy.ps1 included - PowerShell
 # 5.1 does not require CRLF, and the repo standardizes on LF everywhere.
 LF_ONLY_FILES = UNIT_FILES + ["env.example"] + SHELL_FILES + ["deploy.ps1", "polyperps-health.service", "polyperps-health.timer",
-                                                                              "polyperps-prune.service", "polyperps-prune.timer"]
+                                                                              "polyperps-prune.service", "polyperps-prune.timer",
+                                                                              "polyperps-backfill.service", "polyperps-backfill.timer"]
 
 LIVE_EXECUTOR_RE = re.compile(r"--executor\s+live")
 
@@ -130,6 +131,19 @@ def test_paper_unit_runs_the_trader_in_sim_mode():
     assert not (REPO_ROOT / "scripts" / "run_paper.py").exists()
 
 
-@pytest.mark.parametrize("name", UNIT_FILES + SHELL_FILES + ["polyperps-health.service", "polyperps-prune.service"])
+@pytest.mark.parametrize("name", UNIT_FILES + SHELL_FILES + ["polyperps-health.service", "polyperps-prune.service",
+                                                           "polyperps-backfill.service"])
 def test_no_deploy_file_runs_the_live_smoke_script(name):
     assert "live_smoke" not in _read(name)
+
+
+def test_backfill_timer_is_wired():
+    svc = _read("polyperps-backfill.service")
+    assert "User=polyperps" in svc
+    assert "OnFailure=polyperps-health.service" in svc
+    assert "scripts/backfill.py --days 1 --interval 1h" in svc
+    for script in EXEC_START_RE.findall(svc):
+        assert (REPO_ROOT / script).is_file()
+    assert "OnCalendar=*:05" in _read("polyperps-backfill.timer")
+    for name in ("bootstrap.sh", "update.sh"):
+        assert "polyperps-backfill.timer" in _read(name)

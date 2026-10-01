@@ -30,7 +30,7 @@ fi
 
 sudo -u polyperps .venv/bin/pip install -e . --quiet
 
-for unit in polyperps-feed.service polyperps-paper.service polyperps-dashboard.service polyperps-prune.service polyperps-prune.timer polyperps-health.service polyperps-health.timer; do
+for unit in polyperps-feed.service polyperps-paper.service polyperps-dashboard.service polyperps-prune.service polyperps-prune.timer polyperps-health.service polyperps-health.timer polyperps-backfill.service polyperps-backfill.timer; do
   if ! cmp -s "deploy/${unit}" "/etc/systemd/system/${unit}"; then
     cp "deploy/${unit}" "/etc/systemd/system/${unit}"
     systemctl daemon-reload
@@ -38,6 +38,7 @@ for unit in polyperps-feed.service polyperps-paper.service polyperps-dashboard.s
 done
 
 systemctl enable --now polyperps-prune.timer
+systemctl enable --now polyperps-backfill.timer
 systemctl restart polyperps-feed polyperps-paper polyperps-dashboard
 systemctl enable --now polyperps-health.timer   # after the restart, or it pages a false unit_down
 

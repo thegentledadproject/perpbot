@@ -15,7 +15,7 @@ def load():
 def run(mod, state=None, **kw):
     args = dict(now=NOW, disk_pct=50.0, last_ticks={6: NOW, 7: NOW},
                 units={"polyperps-feed.service": UP, "polyperps-paper.service": UP},
-                prune_result="success", state=state or {})
+                oneshot_results={"polyperps-prune.service": "success", "polyperps-backfill.service": "success"}, state=state or {})
     args.update(kw)
     return mod.evaluate(**args)
 
@@ -50,11 +50,20 @@ def test_missing_ticks_count_as_stale():
     assert kinds(alerts) == [("CRITICAL", "ticks_stale")]
 
 
-def test_unit_down_and_prune_failed():
+def test_unit_down_and_oneshot_failed():
     alerts, _ = run(load(), units={"polyperps-feed.service": {"ActiveState": "failed", "NRestarts": "0"},
                                    "polyperps-paper.service": UP},
-                    prune_result="exit-code")
-    assert sorted(kinds(alerts)) == [("CRITICAL", "prune_failed"), ("CRITICAL", "unit_down")]
+                    oneshot_results={"polyperps-prune.service": "success",
+                                     "polyperps-backfill.service": "exit-code"})
+    assert sorted(kinds(alerts)) == [("CRITICAL", "oneshot_failed"), ("CRITICAL", "unit_down")]
+    failed = [a for a in alerts if a.kind == "oneshot_failed"][0]
+    assert failed.detail == {"unit": "polyperps-backfill.service", "result": "exit-code"}
+
+
+def test_old_prune_failed_key_clears():
+    """State written by the previous version used the key 'prune_failed'; it clears as recovered."""
+    alerts, state = run(load(), state={"open": ["prune_failed"], "restarts": {}})
+    assert kinds(alerts) == [("INFO", "recovered")] and state["open"] == []
 
 
 def test_restart_alerts_on_each_increase_not_on_first_sight():

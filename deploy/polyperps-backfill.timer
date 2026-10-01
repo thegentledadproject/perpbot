@@ -1,0 +1,9 @@
+[Unit]
+Description=hourly polyperps backfill, 5 minutes past the hour (the hour's candle and funding have closed)
+
+[Timer]
+OnCalendar=*:05
+Persistent=true
+
+[Install]
+WantedBy=timers.target

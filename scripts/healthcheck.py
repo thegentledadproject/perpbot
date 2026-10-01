@@ -1,11 +1,11 @@
-"""Ops health check, run every 5 minutes by polyperps-health.timer (and by prune's OnFailure=).
+"""Ops health check, run every 5 minutes by polyperps-health.timer (and by prune's and backfill's OnFailure=).
 
 Raises a CRITICAL alert (Telegram when configured; always the journal and the alerts table,
 run_id "ops-health") when:
   - the DB's disk is at least HEALTH_DISK_PCT full (default 95)
   - an instrument's newest stored tick is older than HEALTH_TICK_STALE_S (default 300)
   - polyperps-feed / polyperps-paper is not active, or systemd restarted it since the last check
-  - the last polyperps-prune run did not succeed
+  - the last polyperps-prune or polyperps-backfill run did not succeed
 A lasting problem alerts once when it appears and once (INFO "recovered") when it clears; that
 memory lives in health-state.json next to the DB. Thresholds default here, not in
 /etc/polyperps/env, because deploys never update that file.
@@ -27,7 +27,7 @@ from polyperps.storage import db
 
 RUN_ID = "ops-health"   # not the paper run id: ops alerts must not change the soak's own counters
 UNITS = ("polyperps-feed.service", "polyperps-paper.service")
-PRUNE = "polyperps-prune.service"
+ONESHOTS = ("polyperps-prune.service", "polyperps-backfill.service")
 log = logging.getLogger("polyperps.health")
 
 
@@ -37,7 +37,7 @@ def _alert(now: datetime, level: str, key: str, detail: dict) -> Alert:
 
 
 def evaluate(*, now: datetime, disk_pct: float, last_ticks: dict[int, datetime | None],
-             units: dict[str, dict[str, str]], prune_result: str, state: dict,
+             units: dict[str, dict[str, str]], oneshot_results: dict[str, str], state: dict,
              disk_limit: float = 95.0, stale_s: float = 300.0) -> tuple[list[Alert], dict]:
     """Pure: current readings + last state -> (alerts to send, next state)."""
     problems: dict[str, dict] = {}
@@ -50,8 +50,9 @@ def evaluate(*, now: datetime, disk_pct: float, last_ticks: dict[int, datetime |
     for unit, props in units.items():
         if props.get("ActiveState") != "active":
             problems[f"unit_down:{unit}"] = {"unit": unit, "state": props.get("ActiveState")}
-    if prune_result not in ("success", ""):
-        problems["prune_failed"] = {"result": prune_result}
+    for unit, result in oneshot_results.items():
+        if result not in ("success", ""):
+            problems[f"oneshot_failed:{unit}"] = {"unit": unit, "result": result}
 
     alerts: list[Alert] = []
     seen = state.get("restarts", {})
@@ -106,7 +107,7 @@ def main() -> None:
             disk_pct=disk_used_pct(usage),
             last_ticks={i: last_tick(conn, i) for i in settings.instrument_ids},
             units={u: unit_props(u) for u in UNITS},
-            prune_result=unit_props(PRUNE).get("Result", ""),
+            oneshot_results={u: unit_props(u).get("Result", "") for u in ONESHOTS},
             state=load_state(state_path),
             disk_limit=float(os.environ.get("HEALTH_DISK_PCT") or 95),
             stale_s=float(os.environ.get("HEALTH_TICK_STALE_S") or 300),
