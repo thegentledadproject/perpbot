@@ -261,3 +261,15 @@ async def test_non_shadow_orphan_stop_is_still_cancelled():
     ms = await pf.reconcile_now()
     assert "stop_without_position" in [m.kind for m in ms]
     assert "stop_orphan_cancelled" in [a[2] for a in list_alerts(conn, "r")]
+
+
+async def test_shadow_refused_keeps_distinct_alien_orders_apart():
+    class TwoAliens(AlienOrderAccount):
+        async def fetch_open_orders(self):
+            return tuple(SimpleNamespace(client_order_id=f"alien-{i}", id=i, tp_sl=None, instrument_id=6)
+                         for i in (1, 2))
+
+    conn, pf = _shadow_pf(TwoAliens())
+    await pf.reconcile_now()
+    await pf.reconcile_now()
+    assert [a[2] for a in list_alerts(conn, "r")].count("shadow_refused") == 2

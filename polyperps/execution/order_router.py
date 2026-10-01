@@ -523,7 +523,7 @@ class Portfolio:
         self.start_equity = start_equity                # I7: pnl_drawdown baseline; None = alert unwired
         self._last_pnl_level: str | None = None
         self._funding_seen: dict[int, Decimal] = {}   # last cumulative funding per instrument, for §4.11
-        self._refused_reported: set[tuple[str, int | None]] = set()   # shadow_refused already alerted
+        self._refused_reported: set[tuple[str, int | None, str, str]] = set()   # shadow_refused already alerted
         self._lock = asyncio.Lock()
 
     async def on_bar(self, histories: Mapping[int, Sequence[Bar]], kill: Action) -> None:
@@ -675,11 +675,11 @@ class Portfolio:
             except ShadowRefused:
                 # Shadow mode: the response would have written to the real account. Record it and
                 # keep reconciling (Part A §3.3) instead of taking the reconcile loop down.
-                if (m.kind, m.instrument_id) not in self._refused_reported:   # once per persisting mismatch
-                    self._refused_reported.add((m.kind, m.instrument_id))
+                if (m.kind, m.instrument_id, m.local, m.remote) not in self._refused_reported:   # once per persisting mismatch
+                    self._refused_reported.add((m.kind, m.instrument_id, m.local, m.remote))
                     if m.kind == "stop_without_position":
                         detail = {**detail, "action": "cancel_stop"}
                     self.alerter.emit(Alert(level="WARN", kind="shadow_refused", instrument_id=m.instrument_id,
                                             detail=detail, ts=now))
-        self._refused_reported &= {(m.kind, m.instrument_id) for m in mismatches}
+        self._refused_reported &= {(m.kind, m.instrument_id, m.local, m.remote) for m in mismatches}
         return mismatches
