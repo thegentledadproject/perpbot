@@ -874,6 +874,16 @@ async def test_liquidation_fill_keeps_the_router_liquidated_and_never_re_enters(
     assert list_decisions(conn, "r", 6)[-1].note == "skip:LIQUIDATED" and get_order(conn, "r-6-2") is None
 
 
+async def test_halt_leaves_a_liquidated_router_liquidated():
+    """A size mismatch found after a partial liquidation must not relabel LIQUIDATED as HALTED."""
+    conn, ex, strat, router, pf = make(executor_cls=LiquidatingExecutor)
+    await pf.on_bar({6: [bar(0)]}, "run"); await pump(pf, ex)
+    await pf.on_fast({6: Decimal(100)})
+    assert router.state is State.LIQUIDATED
+    await router.halt("size mismatch")
+    assert router.state is State.LIQUIDATED and "halted" not in kinds(conn)
+
+
 async def test_shadow_venue_fills_open_then_flatten_without_crashing_the_pump():
     """I2: in shadow a venue fill reaches replace_stop/cancel_stop; neither may escape handle_event."""
     conn = connect(":memory:")

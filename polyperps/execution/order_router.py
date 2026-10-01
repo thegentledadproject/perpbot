@@ -470,8 +470,8 @@ class InstrumentRouter:
         self._alert("INFO", "stop_placed", trigger=trigger)
 
     async def halt(self, reason: str) -> None:
-        if self.state is State.HALTED:
-            return  # idempotent: a persisting condition (e.g. reconcile) must not re-alert/re-write each cycle
+        if self.state in _FROZEN:
+            return  # a frozen router (HALTED or LIQUIDATED) stays as it is: reconcile must not re-alert, re-write or relabel LIQUIDATED
         self._alert("CRITICAL", "halted", reason=reason)
         self._pending_cid = None
         self._set_state(State.HALTED)
