@@ -316,17 +316,21 @@ _NATIVE_TICK_SOURCES = (SourceType.POLYMARKET_WS.value, SourceType.POLYMARKET_RE
 def query_last_index_by_hour(
     conn: sqlite3.Connection, instrument_id: int, *, start: datetime, end: datetime
 ) -> dict[datetime, Decimal]:
-    """Last native index_price per hour in [start, end]. Streams the cursor: one row in
-    memory at a time, no Tick objects -- weeks of ticks must not be materialised for bars."""
+    """Last native index_price per hour in [start, end], reduced in SQLite: one row per hour
+    comes back instead of every tick (millions per day; the Python loop took ~3 min per
+    instrument at every paper restart). exchange_ts is UTC ISO text from _ts(), so its first
+    13 chars ('YYYY-MM-DDTHH') are the hour; SQLite returns the bare index_price from the row
+    holding MAX(exchange_ts)."""
+    # ponytail: ties on the hour's last exchange_ts pick either row (the old loop broke ties by
+    # sequence); add sequence to the reduction if same-timestamp ticks ever disagree in practice.
     cur = conn.execute(
-        "SELECT exchange_ts, index_price FROM ticks WHERE instrument_id=? AND source_type IN (?, ?) "
-        "AND exchange_ts BETWEEN ? AND ? ORDER BY exchange_ts, sequence",
+        "SELECT substr(exchange_ts, 1, 13) AS hour, index_price, MAX(exchange_ts) FROM ticks "
+        "WHERE instrument_id=? AND source_type IN (?, ?) AND exchange_ts BETWEEN ? AND ? "
+        "GROUP BY hour",
         (instrument_id, *_NATIVE_TICK_SOURCES, _ts(start), _ts(end)),
     )
-    out: dict[datetime, Decimal] = {}
-    for ts, index_price in cur:
-        out[_floor_hour(_parse_ts(ts))] = Decimal(index_price)  # ordered by ts: last wins
-    return out
+    return {datetime.fromisoformat(hour + ":00:00+00:00"): Decimal(index_price)
+            for hour, index_price, _ in cur}
 
 
 def _spread_bps(bids_json: str, asks_json: str) -> Decimal | None:
