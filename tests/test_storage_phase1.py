@@ -133,11 +133,11 @@ def test_query_book_spread_bps_by_hour_groups_and_skips_one_sided_books():
 
 
 def test_query_last_index_by_hour_same_timestamp_tie_is_one_value():
-    """Two native ticks share the hour's last exchange_ts: one value for that hour, no crash."""
+    """Two native ticks (WS and REST) share the hour's last exchange_ts: one value for that hour, no crash."""
     conn = connect(":memory:")
     ts = T0 + timedelta(minutes=30)
     insert_tick(conn, _tick(ts, "100", seq=1))
-    insert_tick(conn, _tick(ts, "101", seq=2))
+    insert_tick(conn, _tick(ts, "101", st=SourceType.POLYMARKET_REST, seq=2))
     out = query_last_index_by_hour(conn, 6, start=T0, end=T0 + H - timedelta(microseconds=1))
     assert list(out) == [T0] and out[T0] in (Decimal("100"), Decimal("101"))
 

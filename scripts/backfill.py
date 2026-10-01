@@ -99,6 +99,7 @@ async def main() -> None:
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=args.days)
     aborted = False
+    any_failed = False
     try:
         instruments = {i.instrument_id: i for i in await client.fetch_instruments()}
         for iid in settings.instrument_ids:
@@ -156,13 +157,14 @@ async def main() -> None:
                 print("  candles: no gaps")
 
             if failed_windows:
+                any_failed = True
                 print(f"  windows NOT backfilled ({len(failed_windows)}):")
                 for a, b in failed_windows:
                     print(f"    {a.isoformat()} -> {b.isoformat()}")
     finally:
         await client.close()
         conn.close()
-    if aborted:
+    if aborted or any_failed:
         raise SystemExit(1)
 
 

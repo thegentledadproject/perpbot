@@ -38,3 +38,38 @@ def test_minute_candles_use_their_own_interval():
     mod = load()
     out = mod.closed([_c(T0, "1m"), _c(T0 + timedelta(minutes=1), "1m")], now=T0 + timedelta(minutes=1, seconds=30))
     assert [c.open_ts for c in out] == [T0]
+
+
+def test_main_exits_1_when_a_window_exhausts_retries(monkeypatch, tmp_path):
+    """A window that never succeeds must fail the unit so the health alert fires."""
+    import asyncio
+    import sys
+    from types import SimpleNamespace
+
+    import pytest
+
+    from polyperps.exchange.client import TRANSIENT_ERRORS, PolymarketPerpsClient
+
+    mod = load()
+
+    class FakeClient:
+        async def fetch_instruments(self):
+            return [SimpleNamespace(instrument_id=6, symbol="X", funding_interval="1h")]
+
+        async def fetch_funding_history(self, *a, **k):
+            raise TRANSIENT_ERRORS[0]("boom")
+
+        async def close(self):
+            pass
+
+    async def no_sleep(_):
+        pass
+
+    monkeypatch.setenv("POLYPERPS_DB_PATH", str(tmp_path / "t.sqlite3"))
+    monkeypatch.setenv("POLYPERPS_INSTRUMENT_IDS", "6")
+    monkeypatch.setattr(PolymarketPerpsClient, "create_public", staticmethod(lambda **k: FakeClient()))
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(sys, "argv", ["backfill.py", "--days", "1", "--interval", "1h"])
+    with pytest.raises(SystemExit) as ei:
+        asyncio.run(mod.main())
+    assert ei.value.code == 1
