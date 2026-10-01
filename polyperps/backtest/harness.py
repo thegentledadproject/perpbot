@@ -1,9 +1,17 @@
-"""Event-driven hourly backtest (spec 5.2).
+"""Event-driven hourly backtest (spec 5.2), following the live router's rules (Phase 2b Part A §6).
 
-Point-in-time: the strategy receives bars[:t+1]. Fills happen at the 1-minute
-close latency_s after the NEXT bar opens; no minute candle -> no fill.
-Gaps: flatten before an incomplete bar, no re-entry until a complete one.
-Fixed notional, 1x, no liquidation modelling (Phase 2 owns sizing/leverage).
+Point-in-time: the strategy receives bars[:t+1]. Fills happen at the 1-minute close latency_s
+after the NEXT bar opens; no minute candle -> the hourly open (counted). At each bar, in order:
+  1. the 15 % stop fires intrabar when the bar's high/low crosses it, at the stop price;
+  2. funding is paid on the position's value at the bar close;
+  3. a bar that is not complete exits to flat at its close and never enters (a next bar with no
+     price at all - a hole in stored data - is flattened before, as it always was);
+  4. the liquidation-distance and funding-cost exits (risk.liquidation_guard) run at the close;
+  5. the strategy decides; a flip exits this bar and re-enters next bar only if the strategy
+     still wants the other side.
+Every trade that ends flat calls strategy.on_flatten(), as the router's fill handler does.
+Costs are costs.fill_cost on the traded value - the same call SimExecutor makes. Fixed notional;
+the guards use the router's 3x liquidation price.
 """
 
 from __future__ import annotations
@@ -11,15 +19,23 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
 from typing import Literal
 
 from polyperps.backtest.bars import Bar, floor_minute
 from polyperps.backtest.costs import fill_cost
 from polyperps.backtest.strategy import Strategy, clamp_target
+from polyperps.execution.types import PositionView
+from polyperps.risk.liquidation_guard import LIMITS, check_open, funding_exit_due, liquidation_price, stop_price
 from polyperps.signal.sufficiency import BAR
 
-Kind = Literal["funding", "fill", "fill_unavailable", "gap_flatten", "mark"]
+Kind = Literal["funding", "fill", "fill_unavailable", "gap_flatten", "mark", "stop", "guard_exit"]
+_Q = Decimal("0.00000001")
+
+# Bump on any change to the harness's trading rules or cost model. Validation records carry it and
+# the live gate (signal.base) accepts only records at the current version.
+# 1 = Phase 1 harness (flip in one fill, no guards); 2 = Part A router parity.
+HARNESS_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -40,6 +56,7 @@ class BacktestResult:
     returns: list[Decimal] = field(default_factory=list)
     trade_pnls: list[Decimal] = field(default_factory=list)
     fill_notionals: list[Decimal] = field(default_factory=list)
+    trades: list[tuple[datetime, str, Decimal]] = field(default_factory=list)  # (ts, side, quantity) per fill
     params: dict[str, object] = field(default_factory=dict)  # harness params + {"strategy_params": {...}}
     bars_total: int = 0
     bars_complete: int = 0
@@ -57,6 +74,11 @@ def _sign(x: Decimal) -> int:
     return 0
 
 
+def _units(fraction: Decimal, notional: Decimal, price: Decimal) -> Decimal:
+    """Contracts for a leg worth |fraction| x notional at `price`: the router's quantity rule."""
+    return (abs(fraction) * notional / price).quantize(_Q, rounding=ROUND_DOWN)
+
+
 class _Book:
     """Mutable position state for one run."""
 
@@ -65,6 +87,7 @@ class _Book:
         self.cash = Decimal(0)
         self.position = Decimal(0)
         self.entry = Decimal(0)
+        self.funding = Decimal(0)   # cumulative since entry; negative = paid (PositionView convention)
 
     def unrealised(self, price: Decimal) -> Decimal:
         if self.position == 0:
@@ -73,6 +96,14 @@ class _Book:
 
     def equity(self, price: Decimal | None) -> Decimal:
         return self.cash + (self.unrealised(price) if price is not None else Decimal(0))
+
+    def view(self, instrument_id: int, price: Decimal) -> PositionView:
+        """The book as the router's guards see a venue position."""
+        size = self.position * self.notional / self.entry
+        return PositionView(instrument_id=instrument_id, size=size, entry_price=self.entry,
+                            notional=abs(size) * price, leverage=LIMITS.max_leverage,
+                            liquidation_price=liquidation_price(size, self.entry),
+                            unrealised_pnl=size * (price - self.entry), cumulative_funding=self.funding)
 
 
 def run_backtest(
@@ -109,14 +140,14 @@ def run_backtest(
         if delta == 0:
             return
         old_position, old_entry = book.position, book.entry
-        if old_position != 0 and (target == 0 or _sign(target) != _sign(old_position)):
-            # Close or flip: realise the full old leg at the fill price; the new leg (if any)
-            # starts fresh at this fill.
+        # Flips never reach here: the decision step turns a flip into an exit (router rule).
+        reducing = old_position != 0 and abs(target) < abs(old_position)
+        if old_position != 0 and target == 0:
             realised = old_position * notional * (price / old_entry - 1)
             book.cash += realised
             res.trade_pnls.append(realised)
-            new_entry = price if target != 0 else Decimal(0)
-        elif old_position != 0 and abs(target) < abs(old_position):
+            new_entry = Decimal(0)
+        elif reducing:
             # Same-direction reduction: realise only the closed portion; the retained leg keeps
             # its original cost basis.
             closed = abs(old_position) - abs(target)
@@ -128,15 +159,27 @@ def run_backtest(
             # Opening from flat, or a same-direction increase: nothing realised; entry becomes
             # the size-weighted average of the retained and added notional.
             new_entry = (abs(old_position) * old_entry + abs(delta) * price) / abs(target)
-        notional_delta = abs(delta) * notional
-        cost = fill_cost(notional_delta=notional_delta, notional=notional, spread_bps=spread_bps,
+        if reducing:
+            # A closing leg trades at its current value - what the venue charges fees on.
+            value = abs(delta) * notional * price / old_entry
+            qty = _units(delta, notional, old_entry)
+        else:
+            value = abs(delta) * notional
+            qty = _units(delta, notional, price)
+        cost = fill_cost(notional_delta=value, notional=notional, spread_bps=spread_bps,
                          taker_fee_rate=taker_fee_rate, impact_bps=impact_bps)
         book.cash -= cost
         book.position = target
         book.entry = new_entry
-        res.fill_notionals.append(notional_delta)
+        res.fill_notionals.append(value)
+        res.trades.append((ts, "buy" if delta > 0 else "sell", qty))
         res.fills += 1
         log(ts, kind, price, -cost, note)
+        if target == 0:
+            book.funding = Decimal(0)
+            hook = getattr(strategy, "on_flatten", None)   # simple test strategies may not have one
+            if callable(hook):
+                hook()
 
     def mark(ts: datetime, price: Decimal | None) -> None:
         nonlocal last_equity
@@ -149,26 +192,39 @@ def run_backtest(
     for t in range(warmup, len(bars) - 1):
         bar, nxt = bars[t], bars[t + 1]
 
-        if book.position != 0 and bar.funding_rate is not None:
-            paid = -book.position * notional * bar.funding_rate
+        # 1. Intrabar stop.
+        # ponytail: stop and guards are bar-granular vs the router's 20 s loop; move to 1m bars once the 1m backfill exists
+        if book.position != 0 and bar.high is not None and bar.low is not None:
+            long = book.position > 0
+            trigger = stop_price(side="long" if long else "short", entry=book.entry)
+            if (bar.low <= trigger) if long else (bar.high >= trigger):
+                trade_to(Decimal(0), trigger, bar.spread_bps, bar.open_ts, "stop")
+
+        # 2. Funding on the position's value at the close.
+        if book.position != 0 and bar.funding_rate is not None and bar.close is not None:
+            paid = -book.position * notional * (bar.close / book.entry) * bar.funding_rate
             book.cash += paid
+            book.funding += paid
             log(bar.open_ts, "funding", bar.close, paid)
 
-        if not nxt.complete or not bar.complete:
-            # Invariant: a position can only be non-zero here if the previous iteration's
-            # completeness check passed for this same bar, so bar.close is never None when
-            # book.position != 0 — the guard below is defensive, not a live path.
+        # 3. Gaps. Invariant: a position can only be non-zero here if the previous iteration saw
+        # this bar priced (nxt.close not None), so bar.close is never None when book.position != 0.
+        if not bar.complete or nxt.close is None:
             if book.position != 0 and bar.close is not None:
-                trade_to(Decimal(0), bar.close, bar.spread_bps, bar.open_ts, "gap_flatten")
-                # Simple test strategies may not implement on_flatten; only real ones need to
-                # reset internal position/hold state after a forced flatten.
-                hook = getattr(strategy, "on_flatten", None)
-                if callable(hook):
-                    hook()
+                trade_to(Decimal(0), bar.close, bar.spread_bps, nxt.open_ts, "gap_flatten")
             mark(nxt.open_ts, nxt.close)
             continue
 
+        # 4. The router's protective exits, at the close.
+        if book.position != 0:
+            view = book.view(bar.instrument_id, bar.close)
+            if check_open(view, mark=bar.close) == "flatten" or funding_exit_due(view):
+                trade_to(Decimal(0), bar.close, bar.spread_bps, nxt.open_ts, "guard_exit")
+
+        # 5. Decide. A flip exits this bar; re-entry is next bar's decision.
         target = clamp_target(strategy.target(bars[: t + 1]))
+        if book.position != 0 and target != 0 and _sign(target) != _sign(book.position):
+            target = Decimal(0)
         if target != book.position:
             fill_ts = nxt.open_ts + latency
             price = minute_closes.get(floor_minute(fill_ts))

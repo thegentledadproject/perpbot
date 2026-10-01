@@ -20,7 +20,7 @@ from polyperps.exchange.types import (
     SourceType,
     Tick,
 )
-from polyperps.execution.types import DecisionRow, Intent, OrderRow, PositionLocalRow, State
+from polyperps.execution.types import AccountSnapshot, DecisionRow, Intent, OrderRow, PositionLocalRow, PositionView, State
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS ticks (
@@ -102,6 +102,9 @@ CREATE TABLE IF NOT EXISTS positions_local (
     PRIMARY KEY (run_id, instrument_id)
 );
 CREATE TABLE IF NOT EXISTS sim_account (run_id TEXT PRIMARY KEY, json TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS account_snapshots (
+    run_id TEXT PRIMARY KEY, ts TEXT NOT NULL, executor TEXT NOT NULL, start_equity TEXT NOT NULL, json TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS alerts (
     ts TEXT NOT NULL, run_id TEXT NOT NULL, level TEXT NOT NULL, kind TEXT NOT NULL,
     instrument_id INTEGER, detail_json TEXT NOT NULL
@@ -470,6 +473,42 @@ def save_sim_account(conn: sqlite3.Connection, run_id: str, json_text: str) -> N
 def load_sim_account(conn: sqlite3.Connection, run_id: str) -> str | None:
     r = conn.execute("SELECT json FROM sim_account WHERE run_id=?", (run_id,)).fetchone()
     return r[0] if r else None
+
+
+def save_account_snapshot(conn: sqlite3.Connection, run_id: str, snap: AccountSnapshot, *,
+                          start_equity: Decimal, executor: str) -> None:
+    """Part A §3.4: the runner's latest fast-loop snapshot, one row per run (sim, shadow and live alike)."""
+    blob = json.dumps({
+        "equity": str(snap.equity), "in_liquidation": snap.in_liquidation, "open_orders": list(snap.open_orders),
+        "stops": {str(i): str(t) for i, t in snap.stops.items()},
+        "positions": [{"instrument_id": p.instrument_id, "size": str(p.size), "entry_price": str(p.entry_price),
+                       "notional": str(p.notional), "leverage": p.leverage,
+                       "liquidation_price": str(p.liquidation_price) if p.liquidation_price is not None else None,
+                       "unrealised_pnl": str(p.unrealised_pnl), "cumulative_funding": str(p.cumulative_funding)}
+                      for p in snap.positions],
+    })
+    conn.execute("INSERT INTO account_snapshots VALUES (?,?,?,?,?) ON CONFLICT(run_id) DO UPDATE SET "
+                 "ts=excluded.ts, executor=excluded.executor, start_equity=excluded.start_equity, json=excluded.json",
+                 (run_id, _ts(snap.ts), executor, str(start_equity), blob))
+    conn.commit()
+
+
+def load_account_snapshot(conn: sqlite3.Connection, run_id: str) -> tuple[AccountSnapshot, Decimal, str] | None:
+    r = conn.execute("SELECT ts, executor, start_equity, json FROM account_snapshots WHERE run_id=?",
+                     (run_id,)).fetchone()
+    if r is None:
+        return None
+    d = json.loads(r[3])
+    positions = tuple(
+        PositionView(instrument_id=p["instrument_id"], size=Decimal(p["size"]), entry_price=Decimal(p["entry_price"]),
+                     notional=Decimal(p["notional"]), leverage=p["leverage"],
+                     liquidation_price=_dec(p["liquidation_price"]), unrealised_pnl=Decimal(p["unrealised_pnl"]),
+                     cumulative_funding=Decimal(p["cumulative_funding"]))
+        for p in d["positions"])
+    snap = AccountSnapshot(equity=Decimal(d["equity"]), positions=positions, open_orders=tuple(d["open_orders"]),
+                           stops={int(i): Decimal(t) for i, t in d["stops"].items()},
+                           in_liquidation=d["in_liquidation"], ts=_parse_ts(r[0]))
+    return snap, Decimal(r[2]), r[1]
 
 
 def insert_alert(conn: sqlite3.Connection, *, run_id: str, level: str, kind: str, instrument_id: int | None,

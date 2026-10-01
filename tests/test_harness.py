@@ -114,7 +114,7 @@ def test_gap_forces_flatten_and_blocks_reentry_until_complete():
     bars = [bar(0), bar(1), bar(2), bar(3, complete=False), bar(4), bar(5)]
     res = run_backtest(bars, Const(1), minute_closes=minutes(bars), taker_fee_rate=Decimal(0), warmup=0)
     kinds = [(r.ts, r.kind) for r in res.ledger if r.kind in ("fill", "gap_flatten")]
-    assert (T0 + 2 * H, "gap_flatten") in kinds          # flattened at bar 2 close before the gap at bar 3
+    assert (T0 + 3 * H, "gap_flatten") in kinds          # flattened at bar 2's close (stamped with the close time), before the hole at bar 3
     assert not any(ts == T0 + 3 * H and k == "fill" for ts, k in kinds)
     assert (T0 + 5 * H, "fill") in kinds                  # re-enters after the next complete bar
     assert res.bars_complete == 5
@@ -208,7 +208,7 @@ def test_partial_reduction_realises_only_closed_portion():
     assert final_equity == Decimal("10")
 
 
-def test_flip_realises_trade_pnl():
+def test_flip_exits_then_reenters_next_bar():
     bars = [bar(0, "100"), bar(1, "100"), bar(2, "105"), bar(3, "105"), bar(4, "105")]
 
     class Flip:
@@ -218,8 +218,11 @@ def test_flip_realises_trade_pnl():
 
     res = run_backtest(bars, Flip(), minute_closes=minutes(bars), taker_fee_rate=Decimal(0), warmup=0,
                        impact_bps=Decimal(0))
-    assert res.trade_pnls == [Decimal("5")]  # long from 100, flipped at 105
-    assert res.fill_notionals == [Decimal("100"), Decimal("200")]
+    assert res.trade_pnls == [Decimal("5")]  # long from 100, exited at 105
+    # exit leg traded at its current value (105), then a fresh 100 short one bar later
+    assert res.fill_notionals == [Decimal("100"), Decimal("105"), Decimal("100")]
+    assert [side for _, side, _ in res.trades] == ["buy", "sell", "sell"]
+    assert [ts for ts, _, _ in res.trades] == [T0 + 1 * H, T0 + 3 * H, T0 + 4 * H]
 
 
 def test_result_params_namespace_strategy_params():
@@ -233,3 +236,26 @@ def test_result_params_namespace_strategy_params():
     assert res.params["strategy"] == "named"
     assert res.params["strategy_params"] == {"lookback": "48", "entry_z": "1.5"}
     assert "lookback" not in res.params  # not splatted into the harness namespace
+
+
+def test_intrabar_stop_fires_at_the_stop_price():
+    bars = [bar(0, "100"), bar(1, "100"), replace(bar(2, "90"), low=Decimal("80")), bar(3, "90")]
+    res = run_backtest(bars, Const(1), minute_closes=minutes(bars), taker_fee_rate=Decimal(0), warmup=0,
+                       impact_bps=Decimal(0))
+    (stop,) = [r for r in res.ledger if r.kind == "stop"]
+    assert stop.price == Decimal("85.00") and stop.ts == T0 + 2 * H     # 100 * (1 - 0.15)
+
+
+def test_incomplete_but_priced_bar_exits_and_blocks_entry():
+    bars = [bar(0), bar(1), replace(bar(2), complete=False), bar(3), bar(4)]
+    res = run_backtest(bars, Const(1), minute_closes=minutes(bars), taker_fee_rate=Decimal(0), warmup=0)
+    rows = [(r.ts, r.kind) for r in res.ledger if r.kind in ("fill", "gap_flatten")]
+    assert rows == [(T0 + 1 * H, "fill"), (T0 + 3 * H, "gap_flatten"), (T0 + 4 * H, "fill")]
+
+
+def test_funding_cost_guard_exits_at_the_close():
+    bars = [bar(0), bar(1, funding="0.012"), bar(2, funding="0.012"), bar(3), bar(4)]
+    res = run_backtest(bars, Const(1), minute_closes=minutes(bars), taker_fee_rate=Decimal(0), warmup=0,
+                       impact_bps=Decimal(0))
+    (guard,) = [r for r in res.ledger if r.kind == "guard_exit"]
+    assert guard.ts == T0 + 3 * H and guard.position == 0     # 2.4 paid >= 2 % of 100 at bar 2's close

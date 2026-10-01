@@ -108,3 +108,9 @@ def test_funding_exit_due_short_side():
     assert funding_exit_due(pos(6, "100", size_sign=-1, funding="-2")) is True
     assert funding_exit_due(pos(6, "100", size_sign=-1, funding="-1.99")) is False
     assert funding_exit_due(pos(6, "100", size_sign=-1, funding="3")) is False   # shorts collecting positive funding
+
+
+def test_pending_entry_counts_toward_the_leverage_cap():
+    # 3x of 100 equity = 300; 250 already in flight leaves 50 -> qty 0.5
+    v = vet_entry(intent("100"), mark=Decimal(100), snapshot=snap(equity="100"), pending=[intent("250")])
+    assert v == Resize(quantity=Decimal("0.50000000"))

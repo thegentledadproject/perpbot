@@ -9,18 +9,19 @@ from collections.abc import Sequence
 from datetime import datetime
 from decimal import Decimal
 
-from polyperps.backtest.bars import Bar, floor_hour
+from polyperps.backtest.bars import HOUR, Bar, floor_hour
 from polyperps.exchange.types import Tick
 from polyperps.signal.sufficiency import BAR
 
 
 class _Acc:
-    __slots__ = ("open_ts", "o", "h", "l", "c", "index", "funding", "source")
+    __slots__ = ("open_ts", "o", "h", "l", "c", "index", "funding", "source", "complete")
 
-    def __init__(self, t: Tick) -> None:
+    def __init__(self, t: Tick, complete: bool = True) -> None:
         self.open_ts = floor_hour(t.exchange_ts)
         self.o = self.h = self.l = self.c = t.mark_price
         self.index, self.funding, self.source = t.index_price, t.funding_rate, t.source_type
+        self.complete = complete
 
     def add(self, t: Tick) -> None:
         self.h, self.l, self.c = max(self.h, t.mark_price), min(self.l, t.mark_price), t.mark_price
@@ -38,7 +39,7 @@ class LiveBarBuilder:
         a = self._acc.pop(iid)
         bar = Bar(instrument_id=iid, source_type=a.source, open_ts=a.open_ts, open=a.o, high=a.h, low=a.l, close=a.c,
                   index_close=a.index, funding_rate=a.funding, spread_bps=self._spread, spread_source="constant",
-                  complete=True)
+                  complete=a.complete)
         h = self._hist[iid]
         h.append(bar)
         del h[:-self._max]
@@ -50,9 +51,11 @@ class LiveBarBuilder:
         if acc is None:
             self._acc[iid] = _Acc(tick)
             return None
-        if floor_hour(tick.exchange_ts) > acc.open_ts:
+        hour = floor_hour(tick.exchange_ts)
+        if hour > acc.open_ts:
             closed = self._close(iid)
-            self._acc[iid] = _Acc(tick)
+            # Part A §6.4: the first bar after a missing hour is incomplete; the router exits on it.
+            self._acc[iid] = _Acc(tick, complete=hour == acc.open_ts + HOUR)
             return closed
         acc.add(tick)
         return None
@@ -69,9 +72,9 @@ class LiveBarBuilder:
         return list(self._hist[instrument_id])
 
     def close_all(self, now: datetime) -> list[Bar]:
-        """Force-close every open accumulator, stamping each partial hour complete=True.
+        """Force-close every open accumulator, stamping each partial hour complete (unless it follows a missing hour).
 
-        Not called by run_paper.py on shutdown - the partial hour would be delivered
+        Not called by run_trader.py on shutdown - the partial hour would be delivered
         to the router as a complete bar it isn't, poisoning strategy history. Kept for
         tests/tools that want a deterministic flush (e.g. an offline replay harness).
         """

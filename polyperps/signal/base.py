@@ -9,6 +9,7 @@ It is derived, never assigned by hand:
          AND, re-checked from the record itself (defence in depth, spec 8.3):
              source_type is native, sufficiency.met is True, and
              holdout.fills_at_hourly_open == 0
+             and harness_version == the current HARNESS_VERSION (Part A §6.6)
          AND validated.json carries non-empty approved_by and approved_at.
 
 Two keys: code writes the passing record; a human commits the approval.
@@ -23,6 +24,7 @@ import logging
 from pathlib import Path
 from typing import Any, NoReturn
 
+from polyperps.backtest.harness import HARNESS_VERSION
 from polyperps.signal.sufficiency import NATIVE_SOURCES
 from polyperps.signal.validation_log import LOG_PATH, read_records
 
@@ -38,6 +40,9 @@ def _record_passes(record: dict, run_id: str) -> bool:
     Any missing key is a False."""
     if record.get("run_id") != run_id or record.get("passed") is not True:
         return False
+    version = record.get("harness_version")
+    if type(version) is not int or version != HARNESS_VERSION:
+        return False   # a result from older trading rules says nothing about the code that trades
     if record.get("source_type") not in _NATIVE_VALUES:
         return False
     sufficiency = record.get("sufficiency")

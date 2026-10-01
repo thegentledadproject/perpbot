@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from polyperps.backtest.harness import HARNESS_VERSION
 from polyperps.exchange.types import Candle, FeeSchedule, FundingObservation, SourceType
 from polyperps.signal.validation_log import read_records
 from polyperps.storage.db import connect, insert_candle, insert_fee, insert_funding
@@ -81,6 +82,7 @@ def test_run_backtest_h1_native_appends_one_record(tmp_path, monkeypatch):
     assert len(records) == 1
     record = records[0]
     assert record["hypothesis"] == "h1"
+    assert record["harness_version"] == HARNESS_VERSION
     assert record["fee_category_used"] == "equity"
     assert record["passed"] is False  # 400 native hours is far below the 60-day/1000-period bar
 

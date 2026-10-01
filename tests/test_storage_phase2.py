@@ -3,10 +3,11 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
-from polyperps.execution.types import DecisionRow, Intent, OrderRow, PositionLocalRow, State
+from polyperps.execution.types import AccountSnapshot, DecisionRow, Intent, OrderRow, PositionLocalRow, PositionView, State
 from polyperps.storage.db import (
     connect, get_order, get_positions_local, insert_alert, insert_decision, insert_recovery,
-    list_alerts, list_decisions, list_orders, list_recovery, load_sim_account, save_sim_account,
+    list_alerts, list_decisions, list_orders, list_recovery, load_account_snapshot, load_sim_account,
+    save_account_snapshot, save_sim_account,
     upsert_order, upsert_position_local,
 )
 
@@ -67,3 +68,19 @@ def test_sim_account_alerts_recovery():
     assert a[1:4] == ("WARN", "margin_ratio", 6) and a[4] == {"d": 0.3}
     insert_recovery(conn, run_id=RUN, ts=T0, findings_json='{"adopted": []}')
     assert list_recovery(conn, RUN)[0][1] == {"adopted": []}
+
+
+def test_account_snapshot_round_trip_keeps_latest_per_run():
+    conn = connect(":memory:")
+    assert load_account_snapshot(conn, RUN) is None
+    pos = PositionView(instrument_id=6, size=Decimal("-0.5"), entry_price=Decimal(100), notional=Decimal(51),
+                       leverage=3, liquidation_price=None, unrealised_pnl=Decimal("-1"),
+                       cumulative_funding=Decimal("0.02"))
+    first = AccountSnapshot(equity=Decimal(1000), positions=(), open_orders=(), stops={}, in_liquidation=False, ts=T0)
+    later = AccountSnapshot(equity=Decimal("999"), positions=(pos,), open_orders=("r-6-3",), stops={6: Decimal(115)},
+                            in_liquidation=True, ts=T0)
+    save_account_snapshot(conn, RUN, first, start_equity=Decimal(1000), executor="shadow")
+    save_account_snapshot(conn, RUN, later, start_equity=Decimal(1000), executor="shadow")
+    snap, start, executor = load_account_snapshot(conn, RUN)
+    assert snap == later and start == Decimal(1000) and executor == "shadow"
+    assert conn.execute("SELECT COUNT(*) FROM account_snapshots").fetchone()[0] == 1

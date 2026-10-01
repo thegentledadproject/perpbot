@@ -29,7 +29,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from polyperps.backtest.bars import Bar, build_bars, load_minute_closes
-from polyperps.backtest.harness import run_backtest
+from polyperps.backtest.harness import HARNESS_VERSION, run_backtest
 from polyperps.backtest.stats import (
     block_bootstrap_ci, chronological_split, hit_rate, max_drawdown, sharpe, turnover,
 )
@@ -140,6 +140,7 @@ def main() -> None:
             "ts": now.isoformat(),
             "end": end.isoformat(),  # data-window end (--end); repeat with the same value for the same numbers
             "hypothesis": args.hypothesis,
+            "harness_version": HARNESS_VERSION,
             "instrument_id": args.instrument,
             "source_type": source.value,
             "params_chosen": best_params,

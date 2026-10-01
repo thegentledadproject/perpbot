@@ -4,8 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from polyperps.execution.executor import GateClosed
-from polyperps.execution.live_executor import LiveExecutor
+from polyperps.execution.executor import GateClosed, ShadowRefused
+from polyperps.execution.live_executor import LiveExecutor, LiveReader, ShadowExecutor
 from polyperps.execution.types import FillUpdate, OrderRequest, OrderUpdate, ReconcileNow
 from polyperps.gates import ExecutionMode, GateDecision
 
@@ -177,3 +177,67 @@ async def test_events_order_status_mapping():
     out = [e async for e in ex.events()]
     assert len(out) == 1
     assert isinstance(out[0], OrderUpdate) and out[0].status == "rejected"
+
+
+def _req(cid="r-6-1"):
+    return OrderRequest(client_order_id=cid, instrument_id=6, side="buy", quantity=Decimal(1), reduce_only=False, ts=T0)
+
+
+async def test_shadow_refuses_every_write_and_sends_nothing():
+    s = FakeSession()
+    ex = ShadowExecutor(s, clock=lambda: T0)
+    with pytest.raises(ShadowRefused):
+        await ex.submit(_req())
+    with pytest.raises(ShadowRefused):
+        await ex.cancel("r-6-1")
+    with pytest.raises(ShadowRefused):
+        await ex.place_stop(6, Decimal(85))
+    await ex.cancel_stop(6)                    # a no-op: shadow never placed a stop of ours (I2)
+    await ex.heartbeat()                       # nothing to keep alive: shadow never has orders
+    assert s.calls == []
+
+
+async def test_shadow_reads_the_real_account_without_a_gate():
+    ex = ShadowExecutor(FakeSession(), clock=lambda: T0)   # no gate argument: construction never checks locks
+    snap = await ex.snapshot()
+    assert snap.position(6).size == Decimal("0.5") and snap.stops == {6: Decimal(85)}
+    assert ex.name == "shadow" and ex.start_equity is None and ex.poll_fills() == []
+    assert ex.on_tick(None) is None and ex.on_bar(None) is None
+
+
+def test_live_executor_is_a_gated_live_reader():
+    assert issubclass(LiveExecutor, LiveReader) and issubclass(ShadowExecutor, LiveReader)
+    with pytest.raises(GateClosed):
+        LiveExecutor(FakeSession(), instrument_ids=[6], modes={}, gate=lambda iid: GateDecision(False, "closed"))
+
+
+async def test_submit_rechecks_the_gate_on_every_order():
+    s = FakeSession()
+    lock = {"open": True}
+    ex = LiveExecutor(s, instrument_ids=[6], modes={}, gate=lambda iid: GateDecision(lock["open"], "env flipped"),
+                      clock=lambda: T0)
+    lock["open"] = False
+    with pytest.raises(GateClosed):
+        await ex.submit(_req())
+    assert not any(c[0] == "place_order" for c in s.calls)
+
+
+async def test_duplicate_order_counts_as_landed_not_rejected():
+    """Review focus 3: a same-id retry answered with duplicate_order is the original order."""
+    s = FakeSession(order_status="duplicate_order")
+    ex = LiveExecutor(s, instrument_ids=[6], modes={}, gate=OPEN, clock=lambda: T0)
+    ack = await ex.submit(_req())
+    assert ack.status == "accepted" and ack.reason == "duplicate_order"
+    s._events = [SimpleNamespace(type="order", timestamp=T0, payload=SimpleNamespace(
+        client_order_id="r-6-1", status="duplicate_order", filled_quantity=Decimal(0)))]
+    assert [e async for e in ex.events()] == []       # must not reach a pending router as "rejected"
+
+
+async def test_fill_without_client_id_is_kept_and_routed_by_instrument():
+    s = FakeSession()
+    s._events = [SimpleNamespace(type="fill", timestamp=T0, payload=[SimpleNamespace(
+        client_order_id=None, order_id=999, instrument_id=7, side="short", quantity=Decimal(1),
+        price=Decimal(85), fee=Decimal(0))])]
+    ex = LiveExecutor(s, instrument_ids=[6], modes={}, gate=OPEN, clock=lambda: T0)
+    (fill,) = [e async for e in ex.events()]
+    assert fill.client_order_id == "venue-999" and fill.instrument_id == 7 and fill.side == "sell"

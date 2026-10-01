@@ -33,17 +33,24 @@ def vet_exposure(
     equity: Decimal,
     categories: Mapping[int, str],
     limits: ExposureLimits = EXPOSURE,
+    pending: Sequence[Intent] = (),
 ) -> Verdict:
+    """`pending`: other instruments' entry orders sent but not yet filled (Part A 4.9)."""
     if equity <= 0:
         return Reject(reason="equity <= 0")
 
     sign = Decimal(1) if intent.side == "buy" else Decimal(-1)
     my_cluster = cluster_of(categories.get(intent.instrument_id, "other"))
-    gross_existing = sum((p.notional for p in positions), Decimal(0))
-    net_existing = sum(
-        ((Decimal(1) if p.size > 0 else Decimal(-1)) * p.notional
-         for p in positions if cluster_of(categories.get(p.instrument_id, "other")) == my_cluster),
-        Decimal(0),
+    entries = [i for i in pending if not i.reduce_only]
+    gross_existing = (sum((p.notional for p in positions), Decimal(0))
+                      + sum((i.notional for i in entries), Decimal(0)))
+    net_existing = (
+        sum(((Decimal(1) if p.size > 0 else Decimal(-1)) * p.notional
+             for p in positions if cluster_of(categories.get(p.instrument_id, "other")) == my_cluster),
+            Decimal(0))
+        + sum(((Decimal(1) if i.side == "buy" else Decimal(-1)) * i.notional
+               for i in entries if cluster_of(categories.get(i.instrument_id, "other")) == my_cluster),
+              Decimal(0))
     )
 
     allowed = intent.notional

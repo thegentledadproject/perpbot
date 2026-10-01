@@ -121,3 +121,15 @@ def test_health_check_is_wired():
     assert "ImportCredential=TELEGRAM_BOT_TOKEN" in _read("polyperps-paper.service")
     for name in ("bootstrap.sh", "update.sh"):
         assert "polyperps-health.timer" in _read(name)
+
+
+def test_paper_unit_runs_the_trader_in_sim_mode():
+    text = _read("polyperps-paper.service")
+    assert "scripts/run_trader.py --executor sim " in text
+    assert "--run-id ${PAPER_RUN_ID}" in text
+    assert not (REPO_ROOT / "scripts" / "run_paper.py").exists()
+
+
+@pytest.mark.parametrize("name", UNIT_FILES + SHELL_FILES + ["polyperps-health.service", "polyperps-prune.service"])
+def test_no_deploy_file_runs_the_live_smoke_script(name):
+    assert "live_smoke" not in _read(name)

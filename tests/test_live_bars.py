@@ -55,3 +55,13 @@ def test_seed_prepends_closed_history_and_respects_cap():
     closed = b2.on_tick(tick(60 * 5 + 1, "101"))                         # ...and closes on the next hour's tick
     assert closed is not None and b2.history(6) == stored[-2:] + [closed]
     assert b2.history(7) == []                                           # other instruments untouched
+
+
+def test_first_bar_after_a_missing_hour_is_incomplete():
+    b = LiveBarBuilder()
+    b.on_tick(tick(1, "100"))
+    first = b.on_tick(tick(121, "101"))            # hour 1 had no ticks at all
+    assert first.open_ts == T0 and first.complete
+    after_gap = b.on_tick(tick(181, "102"))
+    assert after_gap.open_ts == T0 + timedelta(hours=2) and after_gap.complete is False
+    assert b.on_tick(tick(241, "103")).complete     # the next full hour is complete again

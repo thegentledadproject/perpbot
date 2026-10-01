@@ -50,3 +50,16 @@ def test_reject_when_no_room():
 def test_reject_when_equity_non_positive():
     v = vet_exposure(intent(6, "100"), positions=[], equity=Decimal(0), categories=CATS)
     assert v == Reject(reason="equity <= 0")
+
+
+def test_pending_entry_counts_like_a_position():
+    # BTC long 500 is still in flight (no position yet): an ETH long 500 is resized by the cluster cap
+    v = vet_exposure(intent(7, "500"), positions=[], equity=Decimal(1000), categories=CATS,
+                     pending=[intent(6, "500")])
+    assert v == Resize(quantity=Decimal("1.00000000"))
+
+
+def test_pending_exit_is_not_counted():
+    exit_ = Intent(instrument_id=6, side="sell", quantity=Decimal(5), notional=Decimal(500), reduce_only=True)
+    assert vet_exposure(intent(7, "100"), positions=[], equity=Decimal(1000), categories=CATS,
+                        pending=[exit_]) == Allow()

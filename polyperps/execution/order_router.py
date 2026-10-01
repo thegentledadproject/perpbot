@@ -16,14 +16,14 @@ from typing import Literal
 
 from polyperps.backtest.bars import Bar
 from polyperps.backtest.strategy import Strategy, clamp_target
-from polyperps.execution.executor import Executor, ExecutorTimeout
+from polyperps.execution.executor import Executor, ExecutorTimeout, ShadowRefused
 from polyperps.execution.reconciliation import Mismatch, diff
 from polyperps.execution.types import (
     AccountSnapshot, DecisionRow, FillUpdate, Intent, OrderAck, OrderRequest, OrderRow, OrderUpdate,
-    PositionLocalRow, ReconcileNow, State,
+    PositionLocalRow, PositionView, ReconcileNow, State,
 )
-from polyperps.monitor.alerts import Alert, Alerter, margin_alert, pnl_alert
-from polyperps.risk.kill_switch import Action
+from polyperps.monitor.alerts import Alert, Alerter, funding_drift_alert, margin_alert, pnl_alert
+from polyperps.risk.kill_switch import Action, loss_limit
 from polyperps.risk.liquidation_guard import (
     LIMITS, Reject, Resize, RiskLimits, Verdict, check_open, funding_exit_due, stop_price, verdict_label, vet_entry,
 )
@@ -31,7 +31,15 @@ from polyperps.risk.portfolio_exposure import EXPOSURE, ExposureLimits, vet_expo
 from polyperps.storage import db
 
 _Q = Decimal("0.00000001")
-_TERMINAL_ORDER_STATUSES = frozenset({"filled", "cancelled", "auto_cancelled", "rejected", "lost"})
+_TERMINAL_ORDER_STATUSES = frozenset({"filled", "cancelled", "auto_cancelled", "rejected", "lost", "error",
+                                      "shadow_refused", "timeout_adopted"})
+# Orders we stopped waiting for and replaced with the exchange's size. A later fill for one of these
+# re-reads the exchange instead of adding to a size that may already include it (Part A §4.4/§4.5).
+# "timeout_adopted" (pending timeout), not "adopted": recovery already uses "adopted" for "still resting".
+_GAVE_UP_STATUSES = frozenset({"lost", "error", "shadow_refused", "timeout_adopted"})
+PENDING_TIMEOUT_S = 30
+# Only an operator (clear_halt / --clear-halt) leaves these; no fill, cancel or adoption may.
+_FROZEN = frozenset({State.HALTED, State.LIQUIDATED})
 
 
 def _utcnow() -> datetime:
@@ -48,6 +56,16 @@ def apply_guards(intent: Intent, verdicts: Sequence[tuple[str, Verdict]]) -> tup
     notional = (intent.notional * qty / intent.quantity).quantize(Decimal("0.01"))
     return Intent(instrument_id=intent.instrument_id, side=intent.side, quantity=qty, notional=notional,
                   reduce_only=intent.reduce_only, reason=intent.reason), labels
+
+
+async def place_exchange_stop(executor: Executor, pos: PositionView, limits: RiskLimits = LIMITS) -> Decimal:
+    """Invariant (Part A §4): a venue position always has a venue stop. Placed at the router's stop
+    distance from the EXCHANGE entry price, so it holds whatever our local row says."""
+    if pos.entry_price <= 0:
+        raise ValueError(f"no stop for instrument {pos.instrument_id}: exchange entry price {pos.entry_price}")
+    trigger = stop_price(side="long" if pos.size > 0 else "short", entry=pos.entry_price, limits=limits)
+    await executor.place_stop(pos.instrument_id, trigger)
+    return trigger
 
 
 class InstrumentRouter:
@@ -78,6 +96,8 @@ class InstrumentRouter:
         self.stop_trigger: Decimal | None = None
         self.cumulative_funding = Decimal(0)
         self._pending_cid: str | None = None
+        self._pending_since: datetime | None = None
+        self.pending_intent: Intent | None = None   # the order in flight; counted by other routers' exposure checks
         self._dseq = 0  # decision-row primary-key counter; distinct from self.seq (order count / cid numbering)
         self._last_margin_level: str | None = None   # I5: margin_ratio alerts fire on level transitions only
 
@@ -119,8 +139,9 @@ class InstrumentRouter:
                                                   verdicts=verdicts, intent=intent, client_order_id=cid, note=note))
 
     # --- bar cycle --------------------------------------------------------------
-    async def on_bar(self, history: Sequence[Bar], snapshot: AccountSnapshot, kill: Action) -> None:
-        if self.state in (State.HALTED, State.LIQUIDATED, State.ENTRY_PENDING, State.EXIT_PENDING):
+    async def on_bar(self, history: Sequence[Bar], snapshot: AccountSnapshot, kill: Action,
+                     pending: Sequence[Intent] = ()) -> None:
+        if self.state in _FROZEN or self.state in (State.ENTRY_PENDING, State.EXIT_PENDING):
             self._record(target=None, verdicts={}, intent=None, cid=None, note=f"skip:{self.state.value}")
             return
         mark = history[-1].close
@@ -128,14 +149,18 @@ class InstrumentRouter:
             self._record(target=None, verdicts={}, intent=None, cid=None, note="skip:no_close")
             return
         if kill == "shutdown":
+            await self.shutdown(mark)
+            return
+        if not history[-1].complete:
+            # Part A §6.4, the backtest's rule: a bar after missing data exits to flat and never enters.
             if self.state is State.OPEN:
-                await self._exit(mark, "kill_shutdown", target=None)
-            self._alert("CRITICAL", "kill_switch", action="shutdown")
-            self._set_state(State.HALTED)
+                await self._exit(mark, "data_gap", target=None)
+            else:
+                self._record(target=None, verdicts={}, intent=None, cid=None, note="skip:data_gap")
             return
         if len(history) < getattr(self.strategy, "warmup", 0):
             # Same rule as the backtest harness: no target call until the strategy has its
-            # lookback. run_paper seeds history from stored candles so this is normally brief.
+            # lookback. run_trader seeds history from stored candles so this is normally brief.
             self._record(target=None, verdicts={}, intent=None, cid=None, note="skip:warmup")
             return
         target = clamp_target(self.strategy.target(history))
@@ -148,9 +173,9 @@ class InstrumentRouter:
             qty = (self.limits.notional_usd / mark).quantize(_Q, rounding=ROUND_DOWN)
             intent = Intent(instrument_id=self.instrument_id, side=side, quantity=qty, notional=self.limits.notional_usd)
             final, labels = apply_guards(intent, [
-                ("vet_entry", vet_entry(intent, mark=mark, snapshot=snapshot, limits=self.limits)),
+                ("vet_entry", vet_entry(intent, mark=mark, snapshot=snapshot, limits=self.limits, pending=pending)),
                 ("vet_exposure", vet_exposure(intent, positions=snapshot.positions, equity=snapshot.equity,
-                                              categories=self.categories, limits=self.exposure)),
+                                              categories=self.categories, limits=self.exposure, pending=pending)),
             ])
             if final is None:
                 self._record(target=target, verdicts=labels, intent=None, cid=None, note="rejected")
@@ -164,10 +189,12 @@ class InstrumentRouter:
         else:
             self._record(target=target, verdicts={}, intent=None, cid=None, note="hold")
 
-    async def _exit(self, mark: Decimal, reason: str, *, target: Decimal | None) -> None:
-        side = "sell" if self.size > 0 else "buy"
-        intent = Intent(instrument_id=self.instrument_id, side=side, quantity=abs(self.size),
-                        notional=(abs(self.size) * mark).quantize(Decimal("0.01")), reduce_only=True, reason=reason)
+    async def _exit(self, mark: Decimal, reason: str, *, target: Decimal | None,
+                    size: Decimal | None = None) -> None:
+        size = self.size if size is None else size
+        side = "sell" if size > 0 else "buy"
+        intent = Intent(instrument_id=self.instrument_id, side=side, quantity=abs(size),
+                        notional=(abs(size) * mark).quantize(Decimal("0.01")), reduce_only=True, reason=reason)
         await self._send(intent, target=target, verdicts={})
 
     # --- fast loop --------------------------------------------------------------
@@ -208,6 +235,8 @@ class InstrumentRouter:
                                             avg_price=None, submitted_at=now, updated_at=now, reason=intent.reason))
         prior = self.state
         self._pending_cid = cid
+        self._pending_since = now
+        self.pending_intent = intent
         self._set_state(State.EXIT_PENDING if intent.reduce_only else State.ENTRY_PENDING)
         # Captured before the await: with a live executor, the event pump can apply this same
         # order's WS fill through handle_event() (updating self.size) while we're still waiting
@@ -215,7 +244,20 @@ class InstrumentRouter:
         size_before = self.size
         req = OrderRequest(client_order_id=cid, instrument_id=self.instrument_id, side=intent.side,
                            quantity=intent.quantity, reduce_only=intent.reduce_only, ts=now)
-        ack = await self._submit_with_recovery(req, size_before)
+        try:
+            ack = await self._submit_with_recovery(req, size_before)
+        except Exception as exc:
+            # Part A §4.5: any submit error other than a timeout (GateClosed, ShadowRefused, a
+            # transport error). The order may or may not be on the venue: take the venue's size as
+            # ours, guard it, and stop trading this instrument until a human looks.
+            self._update_order(cid, status="shadow_refused" if isinstance(exc, ShadowRefused) else "error",
+                               reason=f"{type(exc).__name__}: {exc}")
+            self._alert("CRITICAL", "submit_error", client_order_id=cid, error=type(exc).__name__)
+            # HALTED before adopting: if the adoption itself fails (snapshot or stop placement), the
+            # router is still frozen rather than left pending.
+            await self.halt(f"submit error: {type(exc).__name__}")
+            await self._adopt(await self.executor.snapshot())
+            return
         if ack is None:
             self._update_order(cid, status="lost", reason="no ack after timeout and retry")
             await self.halt("order lost after timeout and retry")
@@ -247,12 +289,13 @@ class InstrumentRouter:
         return None
 
     def _landed(self, req: OrderRequest, snap: AccountSnapshot, size_before: Decimal) -> bool:
+        """Part A §4.6: the order landed if it rests, or if the position moved in its direction by
+        ANY amount (a partial fill counts). Retrying a partly filled order would double it."""
         if req.client_order_id in snap.open_orders:
             return True
-        delta = req.quantity if req.side == "buy" else -req.quantity
         pos = snap.position(self.instrument_id)
-        actual = pos.size if pos is not None else Decimal(0)
-        return actual == size_before + delta
+        moved = (pos.size if pos is not None else Decimal(0)) - size_before
+        return moved > 0 if req.side == "buy" else moved < 0
 
     def _update_order(self, cid: str, *, skip_if_terminal: bool = False, **changes) -> None:
         row = db.get_order(self.conn, cid)
@@ -262,6 +305,71 @@ class InstrumentRouter:
             return
         db.upsert_order(self.conn, replace(row, **changes, updated_at=self.clock()))
 
+    def _record_fill(self, row: OrderRow, ev: FillUpdate) -> None:
+        """Part A §4.6: an order's filled quantity accumulates across fills; a terminal status
+        (e.g. an IOC already reported cancelled) is never downgraded."""
+        filled = row.filled_quantity + ev.quantity
+        if row.avg_price is None or row.filled_quantity == 0:
+            avg = ev.price
+        else:
+            avg = (row.avg_price * row.filled_quantity + ev.price * ev.quantity) / filled
+        if row.status in _TERMINAL_ORDER_STATUSES:
+            status = row.status
+        else:
+            status = "filled" if filled >= row.quantity else "partial"
+        self._update_order(row.client_order_id, status=status, filled_quantity=filled, avg_price=avg)
+
+    async def check_pending(self, snapshot: AccountSnapshot) -> None:
+        """Part A §4.3: a router must not sit in a pending state forever waiting for a fill that
+        never arrives. After PENDING_TIMEOUT_S, adopt the exchange's size."""
+        if self.state not in (State.ENTRY_PENDING, State.EXIT_PENDING) or self._pending_since is None:
+            return
+        if (self.clock() - self._pending_since).total_seconds() <= PENDING_TIMEOUT_S:
+            return
+        cid = self._pending_cid
+        self._alert("WARN", "pending_timeout", client_order_id=cid, state=self.state.value)
+        if cid is not None:
+            self._update_order(cid, status="timeout_adopted", reason="pending timeout: adopted the exchange size")
+        await self._adopt_and_settle(snapshot)
+
+    async def _adopt(self, snapshot: AccountSnapshot) -> None:
+        """Take the exchange's size as ours (exchange = truth) and make sure a venue stop guards it.
+        Leaves the state to the caller."""
+        self._pending_cid = None
+        self._pending_since = None
+        pos = snapshot.position(self.instrument_id)
+        if pos is None or pos.size == 0:
+            self.size, self.entry, self.stop_trigger = Decimal(0), None, None
+            self.cumulative_funding = Decimal(0)
+        else:
+            self.size, self.entry, self.cumulative_funding = pos.size, pos.entry_price, pos.cumulative_funding
+            if self.instrument_id in snapshot.stops:
+                self.stop_trigger = snapshot.stops[self.instrument_id]
+            else:
+                try:
+                    self.stop_trigger = await place_exchange_stop(self.executor, pos, self.limits)
+                except ShadowRefused:
+                    # Shadow mode (as in _reconcile): record it; the adopted size must still persist.
+                    self.stop_trigger = None
+                    self._alert("WARN", "shadow_refused", size=pos.size)
+        self._persist()
+
+    async def _adopt_and_settle(self, snapshot: AccountSnapshot) -> None:
+        """_adopt, then leave the pending state for the exchange's size (never HALTED: only
+        --clear-halt does) and tell the strategy which side it is on, as a restart does."""
+        await self._adopt(snapshot)
+        if self.state not in _FROZEN:
+            self._set_state(State.OPEN if self.size != 0 else State.FLAT)
+        if self.size == 0:
+            await self.executor.cancel_stop(self.instrument_id)
+            hook = getattr(self.strategy, "on_flatten", None)
+            if callable(hook):
+                hook()
+        else:
+            hook = getattr(self.strategy, "on_recover", None)
+            if callable(hook):
+                hook(1 if self.size > 0 else -1)
+
     # --- events -------------------------------------------------------------------
     async def handle_event(self, ev: OrderUpdate | FillUpdate) -> None:
         if isinstance(ev, OrderUpdate):
@@ -269,17 +377,32 @@ class InstrumentRouter:
                 self._update_order(ev.client_order_id, status=ev.status)
                 self._alert("WARN", "order_" + ev.status, client_order_id=ev.client_order_id)
                 self._pending_cid = None
-                self._set_state(State.OPEN if self.size != 0 else State.FLAT)
-            elif db.get_order(self.conn, ev.client_order_id) is not None:
-                self._update_order(ev.client_order_id, status=ev.status, filled_quantity=ev.filled_quantity)
+                if self.state not in _FROZEN:      # only --clear-halt leaves HALTED/LIQUIDATED
+                    self._set_state(State.OPEN if self.size != 0 else State.FLAT)
+            else:
+                row = db.get_order(self.conn, ev.client_order_id)
+                if row is not None and row.status not in _GAVE_UP_STATUSES:
+                    # status only: filled_quantity belongs to the fills, which accumulate it
+                    self._update_order(ev.client_order_id, status=ev.status, skip_if_terminal=True)
             return
         if ev.instrument_id != self.instrument_id:
             return
+        row = db.get_order(self.conn, ev.client_order_id)
+        if row is not None and row.status in _GAVE_UP_STATUSES and ev.client_order_id != self._pending_cid:
+            # We already replaced this order with the exchange's size (or gave up on it). The
+            # exchange is truth: re-read it instead of adding a fill the adoption may include.
+            # ponytail: a late fill while a NEW order is pending runs _adopt, which clears that pending
+            # id; reconcile's size check is the backstop. Upgrade path: skip adoption while another
+            # order is pending.
+            self._alert("WARN", "late_fill", client_order_id=ev.client_order_id, state=self.state.value)
+            self._update_order(ev.client_order_id, filled_quantity=row.filled_quantity + ev.quantity)
+            await self._adopt_and_settle(await self.executor.snapshot())
+            return
         size_before = self.size
-        ours = db.get_order(self.conn, ev.client_order_id) is not None
+        ours = row is not None
         self._apply_fill(ev)
         if ours:
-            self._update_order(ev.client_order_id, status="filled", filled_quantity=ev.quantity, avg_price=ev.price)
+            self._record_fill(row, ev)
         if self.state is State.ENTRY_PENDING and ev.client_order_id == self._pending_cid and self.size != 0:
             self._pending_cid = None
             self._set_state(State.OPEN)
@@ -289,13 +412,23 @@ class InstrumentRouter:
             self._pending_cid = None
             self.stop_trigger = None
             await self.executor.cancel_stop(self.instrument_id)
-            if self.state is not State.HALTED:      # a shutdown already forced HALTED before this fill landed
+            liquidated = self.state is State.LIQUIDATED
+            if self.state not in _FROZEN:      # a shutdown/liquidation already froze it before this fill
                 self._set_state(State.FLAT)
+            else:
+                self._persist()
             hook = getattr(self.strategy, "on_flatten", None)
             if callable(hook):
                 hook()
-            if not was_pending and not ours:
+            if not was_pending and not ours and not liquidated:   # a liquidation fill is not our stop
                 self._alert("WARN", "stop_fired", price=ev.price, quantity=ev.quantity)
+        elif self.state in _FROZEN:
+            # Part A §4.4: a fill that lands while frozen still moves the position. Guard it; stay frozen.
+            self._alert("WARN", "late_fill", client_order_id=ev.client_order_id, state=self.state.value,
+                        size_after=self.size)
+            await self.replace_stop()
+        elif ours and self.state is not State.FLAT:
+            pass   # a later partial fill of our own order; the venue stop is position-level
         else:
             # Neither "our pending entry landed" nor "flattened" - a fill we weren't tracking
             # (e.g. one that arrives after clear_halt(), or for an id we never sent). Surface it
@@ -324,7 +457,14 @@ class InstrumentRouter:
         if self.size == 0 or self.entry is None:
             return
         trigger = stop_price(side="long" if self.size > 0 else "short", entry=self.entry, limits=self.limits)
-        await self.executor.place_stop(self.instrument_id, trigger)
+        try:
+            await self.executor.place_stop(self.instrument_id, trigger)
+        except ShadowRefused:
+            # Shadow (a venue fill reached us): no stop of ours exists; record it, keep the size.
+            self.stop_trigger = None
+            self._persist()
+            self._alert("WARN", "shadow_refused", trigger=trigger)
+            return
         self.stop_trigger = trigger
         self._persist()
         self._alert("INFO", "stop_placed", trigger=trigger)
@@ -334,6 +474,21 @@ class InstrumentRouter:
             return  # idempotent: a persisting condition (e.g. reconcile) must not re-alert/re-write each cycle
         self._alert("CRITICAL", "halted", reason=reason)
         self._pending_cid = None
+        self._set_state(State.HALTED)
+
+    async def shutdown(self, mark: Decimal, exchange_size: Decimal | None = None) -> None:
+        """Kill switch / loss limit (Part A s5): flatten if a position is held, then HALTED until
+        --clear-halt. `exchange_size` (the venue's signed position) wins over the local size, so a
+        position the router never saw is still closed (reduce-only makes over-sizing safe). An
+        already-HALTED router still flattens a position that filled after the halt."""
+        held = self.size if exchange_size is None else exchange_size
+        if self.state is State.LIQUIDATED or (self.state is State.HALTED and held == 0):
+            return
+        was_halted = self.state is State.HALTED
+        if held != 0 and self.state in (State.OPEN, State.HALTED, State.FLAT):
+            await self._exit(mark, "kill_shutdown", target=None, size=held)
+        if not was_halted:
+            self._alert("CRITICAL", "kill_switch", action="shutdown")
         self._set_state(State.HALTED)
 
     def clear_halt(self) -> None:
@@ -347,6 +502,7 @@ class InstrumentRouter:
         if state not in (State.ENTRY_PENDING, State.EXIT_PENDING):
             raise ValueError(f"adopt_pending: state must be ENTRY_PENDING or EXIT_PENDING, got {state}")
         self._pending_cid = client_order_id
+        self._pending_since = self.clock()
         self._set_state(state)
 
 
@@ -366,19 +522,72 @@ class Portfolio:
         self.reconcile = reconcile if reconcile is not None else self._reconcile
         self.start_equity = start_equity                # I7: pnl_drawdown baseline; None = alert unwired
         self._last_pnl_level: str | None = None
+        self._funding_seen: dict[int, Decimal] = {}   # last cumulative funding per instrument, for §4.11
         self._lock = asyncio.Lock()
 
     async def on_bar(self, histories: Mapping[int, Sequence[Bar]], kill: Action) -> None:
         async with self._lock:
             snapshot = await self.executor.snapshot()
+            if kill == "shutdown":
+                await self._shutdown(snapshot, histories)
+                return
+            self._check_funding(histories, snapshot)
             for iid, history in histories.items():
                 router = self.routers.get(iid)
                 if router is not None and history:
-                    await router.on_bar(history, snapshot, kill)
+                    # Recomputed per router: an entry sent earlier in THIS loop is in flight too.
+                    # ponytail: an order adopted by recovery (adopt_pending) has no intent and is not
+                    # counted; rebuild one from its order row if recovered in-flight entries matter.
+                    pending = [r.pending_intent for r in self.routers.values()
+                               if r is not router and r.state is State.ENTRY_PENDING and r.pending_intent is not None]
+                    await router.on_bar(history, snapshot, kill, pending=pending)
 
-    async def on_fast(self, marks: Mapping[int, Decimal]) -> None:
+    def _check_funding(self, histories: Mapping[int, Sequence[Bar]], snapshot: AccountSnapshot) -> None:
+        """Part A §4.11: the funding the venue actually charged since the last bar (delta of the
+        position's cumulative funding) vs bar.funding_rate x notional. Sign convention: negative
+        cumulative funding = paid (PositionView); the live smoke script confirms the SDK's."""
+        for iid, history in histories.items():
+            pos = snapshot.position(iid)
+            if pos is None or pos.size == 0 or not history or history[-1].funding_rate is None:
+                self._funding_seen.pop(iid, None)
+                continue
+            prev = self._funding_seen.get(iid)
+            self._funding_seen[iid] = pos.cumulative_funding
+            if prev is None or pos.notional == 0:
+                continue   # first sighting of this position: a baseline, nothing to compare
+            realised_rate = (prev - pos.cumulative_funding) / pos.notional                # paid is positive
+            expected_rate = history[-1].funding_rate * (1 if pos.size > 0 else -1)       # longs pay positive rates
+            a = funding_drift_alert(realised_rate, expected_rate, iid, snapshot.ts)
+            if a is not None:
+                self.alerter.emit(a)
+
+    async def _shutdown(self, snapshot: AccountSnapshot, histories: Mapping[int, Sequence[Bar]]) -> None:
+        """Flatten every open position and halt EVERY router, not only the ones whose bar just
+        closed (the runner passes one instrument per call). A persisting breach alerts once."""
+        if any(r.state not in _FROZEN for r in self.routers.values()):
+            cause = "loss_limit" if loss_limit(snapshot.equity, self.start_equity) == "shutdown" else "divergence"
+            self.alerter.emit(Alert(level="CRITICAL", kind=cause, instrument_id=None,
+                                    detail={"equity": str(snapshot.equity), "start_equity": str(self.start_equity)},
+                                    ts=snapshot.ts))
+        # ponytail: runs on every shutdown bar, so a position that fills after the shutdown (an entry
+        # in flight) stays open - stop-guarded by the HALTED late-fill path (spec 4.4) - until the next
+        # shutdown bar flattens it; upgrade path: flatten on the late fill itself.
+        for router in self.routers.values():
+            hist = histories.get(router.instrument_id)
+            pos = snapshot.position(router.instrument_id)
+            if hist and hist[-1].close is not None:
+                mark = hist[-1].close
+            elif pos is not None and pos.size != 0:
+                mark = pos.notional / abs(pos.size)
+            else:
+                mark = router.entry or Decimal(0)
+            await router.shutdown(mark, pos.size if pos is not None else Decimal(0))
+
+    async def on_fast(self, marks: Mapping[int, Decimal]) -> AccountSnapshot:
         async with self._lock:
             snapshot = await self.executor.snapshot()
+            for router in self.routers.values():
+                await router.check_pending(snapshot)
             for iid, mark in marks.items():
                 router = self.routers.get(iid)
                 if router is not None:
@@ -390,8 +599,7 @@ class Portfolio:
                 if a is not None and level != self._last_pnl_level:
                     self.alerter.emit(a)
                 self._last_pnl_level = level
-            # funding_drift_alert would go here (realised vs expected funding per instrument);
-            # deferred to Phase 2b - the sim's funding is the predicted rate, so it can never drift.
+            return snapshot
 
     async def dispatch(self, ev: OrderUpdate | FillUpdate | ReconcileNow) -> None:
         async with self._lock:
@@ -422,9 +630,10 @@ class Portfolio:
         snapshot = await self.executor.snapshot()
         local = db.get_positions_local(self.conn, self.run_id)
         # "known_orders" is what diff() treats as ours-and-possibly-still-resting on the venue.
-        # Terminal rows (filled/cancelled/auto_cancelled/rejected/lost) are done as far as we're
-        # concerned; if the venue still lists one as open that's a genuine unknown_order mismatch
-        # worth raising, not something to mask by including every order id we've ever sent.
+        # Terminal rows (_TERMINAL_ORDER_STATUSES, incl. the given-up lost/error/shadow_refused/
+        # timeout_adopted) are done as far as we're concerned; if the venue still lists one as open
+        # that's a genuine unknown_order mismatch worth raising (and cancelling), not something to
+        # mask by including every order id we've ever sent.
         known = {o.client_order_id for o in db.list_orders(self.conn, self.run_id)
                 if o.status not in _TERMINAL_ORDER_STATUSES}
         mismatches = diff(local=local, remote=snapshot, run_id=self.run_id, known_orders=known)
@@ -432,23 +641,36 @@ class Portfolio:
             router = self.routers.get(m.instrument_id) if m.instrument_id is not None else None
             detail = {"local": m.local, "remote": m.remote}
             now = _utcnow()
-            if m.kind == "size":
-                if router is not None:
-                    await router.halt(f"reconcile: size mismatch local={m.local} remote={m.remote}")
-                else:
-                    self.alerter.emit(Alert(level="CRITICAL", kind="unknown_position", instrument_id=m.instrument_id,
+            try:
+                if m.kind == "size":
+                    if router is not None:
+                        await router.halt(f"reconcile: size mismatch local={m.local} remote={m.remote}")
+                    else:
+                        self.alerter.emit(Alert(level="CRITICAL", kind="unknown_position", instrument_id=m.instrument_id,
+                                                detail=detail, ts=now))
+                elif m.kind == "unknown_order":
+                    await self.executor.cancel(m.remote)
+                    self.alerter.emit(Alert(level="WARN", kind="unknown_order", instrument_id=None, detail=detail, ts=now))
+                elif m.kind == "missing_stop":
+                    pos = snapshot.position(m.instrument_id)
+                    trigger = await place_exchange_stop(self.executor, pos,
+                                                        router.limits if router is not None else LIMITS)
+                    if router is not None:
+                        router.stop_trigger = trigger
+                        router._persist()
+                    self.alerter.emit(Alert(level="WARN", kind="stop_missing", instrument_id=m.instrument_id,
+                                            detail={**detail, "trigger": str(trigger)}, ts=now))
+                    self.alerter.emit(Alert(level="INFO", kind="stop_placed", instrument_id=m.instrument_id,
+                                            detail={"trigger": str(trigger)}, ts=now))
+                elif m.kind == "stop_without_position":
+                    await self.executor.cancel_stop(m.instrument_id)
+                    self.alerter.emit(Alert(level="INFO", kind="stop_orphan_cancelled", instrument_id=m.instrument_id,
                                             detail=detail, ts=now))
-            elif m.kind == "unknown_order":
-                await self.executor.cancel(m.remote)
-                self.alerter.emit(Alert(level="WARN", kind="unknown_order", instrument_id=None, detail=detail, ts=now))
-            elif m.kind == "missing_stop":
-                if router is not None:
-                    await router.replace_stop()
-                self.alerter.emit(Alert(level="WARN", kind="stop_missing", instrument_id=m.instrument_id, detail=detail, ts=now))
-            elif m.kind == "stop_without_position":
-                await self.executor.cancel_stop(m.instrument_id)
-                self.alerter.emit(Alert(level="INFO", kind="stop_orphan_cancelled", instrument_id=m.instrument_id,
+                else:
+                    self.alerter.emit(Alert(level="WARN", kind="stop_drift", instrument_id=m.instrument_id, detail=detail, ts=now))
+            except ShadowRefused:
+                # Shadow mode: the response would have written to the real account. Record it and
+                # keep reconciling (Part A §3.3) instead of taking the reconcile loop down.
+                self.alerter.emit(Alert(level="WARN", kind="shadow_refused", instrument_id=m.instrument_id,
                                         detail=detail, ts=now))
-            else:
-                self.alerter.emit(Alert(level="WARN", kind="stop_drift", instrument_id=m.instrument_id, detail=detail, ts=now))
         return mismatches

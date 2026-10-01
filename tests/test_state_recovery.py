@@ -1,14 +1,17 @@
 from dataclasses import replace as dc_replace
 from datetime import datetime, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
+from polyperps.execution.live_executor import ShadowExecutor
 from polyperps.execution.order_router import InstrumentRouter
 from polyperps.execution.sim_executor import SimExecutor
 from polyperps.execution.state_recovery import RecoveryHalt, recover
 from polyperps.execution.types import FillUpdate, OrderRequest, OrderRow, PositionLocalRow, State
 from polyperps.monitor.alerts import Alerter, SqliteSink
+from polyperps.risk.liquidation_guard import stop_price
 from polyperps.storage.db import connect, get_order, list_alerts, list_recovery, upsert_order, upsert_position_local
 
 T0 = datetime(2026, 9, 12, 12, 0, tzinfo=timezone.utc)
@@ -54,8 +57,8 @@ async def test_crash_after_fill_rebuilds_open_and_replaces_stop():
                                                  entry_price=None, stop_trigger=None, stop_order_id=None,
                                                  cumulative_funding=Decimal(0), updated_at=T0))
     rep = await recover(conn=conn, run_id="r", executor=ex, routers={6: router}, alerter=alerter, clock=lambda: T0)
-    assert router.state is State.OPEN and router.size == 1 and router.entry == Decimal("100.08")
-    assert rep.stops_replaced == [6] and (await ex.snapshot()).stops == {6: Decimal("85.07")}
+    assert router.state is State.OPEN and router.size == 1 and router.entry == Decimal(100)
+    assert rep.stops_replaced == [6] and (await ex.snapshot()).stops == {6: Decimal("85.00")}
     assert rep.abandoned == ["r-6-1"]   # not resting on the venue; its fill is already in the position
 
 
@@ -66,6 +69,8 @@ async def test_unknown_remote_position_is_critical():
     rep = await recover(conn=conn, run_id="r", executor=ex, routers={6: router}, alerter=alerter, clock=lambda: T0)
     assert rep.unknown_positions == [8]
     assert any(a[1] == "CRITICAL" and a[2] == "unknown_position" for a in list_alerts(conn, "r"))
+    assert rep.stops_replaced == [8]
+    assert [a[3] for a in list_alerts(conn, "r") if a[1] == "INFO" and a[2] == "stop_placed"] == [8]   # F12
 
 
 async def test_halted_is_preserved():
@@ -153,7 +158,7 @@ async def test_adopting_untracked_position_warns_and_is_reported():
     assert list_recovery(conn, "r")[0][1]["adopted_untracked"] == [6]
     warn = [a for a in list_alerts(conn, "r") if a[2] == "adopted_untracked"]
     assert len(warn) == 1 and warn[0][1] == "WARN" and warn[0][3] == 6
-    assert warn[0][4] == {"instrument_id": "6", "size": "-2", "entry": "99.92"}
+    assert warn[0][4] == {"instrument_id": "6", "size": "-2", "entry": "100"}
 
 
 async def test_adopting_position_over_flat_local_row_also_warns():
@@ -176,3 +181,45 @@ async def test_adopting_position_over_pending_or_open_row_is_not_untracked():
                                                  cumulative_funding=Decimal(0), updated_at=T0))
     rep = await recover(conn=conn, run_id="r", executor=ex, routers={6: router}, alerter=alerter, clock=lambda: T0)
     assert rep.adopted_untracked == [] and not any(a[2] == "adopted_untracked" for a in list_alerts(conn, "r"))
+
+
+@pytest.mark.parametrize("state", [None, State.FLAT, State.ENTRY_PENDING, State.OPEN, State.EXIT_PENDING,
+                                   State.HALTED, State.LIQUIDATED])
+async def test_recovery_guards_every_venue_position_with_a_stop(state):
+    conn, ex, alerter, router = setup()
+    await ex.submit(OrderRequest(client_order_id="r-6-1", instrument_id=6, side="buy", quantity=Decimal(1),
+                                 reduce_only=False, ts=T0))
+    ex.drain_events()
+    if state is not None:
+        upsert_position_local(conn, PositionLocalRow(run_id="r", instrument_id=6, state=state, size=Decimal(0),
+                                                     entry_price=None, stop_trigger=None, stop_order_id=None,
+                                                     cumulative_funding=Decimal(0), updated_at=T0))
+    rep = await recover(conn=conn, run_id="r", executor=ex, routers={6: router}, alerter=alerter, clock=lambda: T0)
+    entry = (await ex.snapshot()).position(6).entry_price
+    assert (await ex.snapshot()).stops == {6: stop_price(side="long", entry=entry)} and rep.stops_replaced == [6]
+    assert router.size == 1 and router.stop_trigger == stop_price(side="long", entry=entry)
+    frozen = state in (State.HALTED, State.LIQUIDATED)
+    assert router.state is (state if frozen else State.OPEN)
+
+
+class ShadowPositionAccount:
+    """The real account as a shadow session sees it: one position on 6 and no stop order."""
+    async def fetch_portfolio(self):
+        p = SimpleNamespace(instrument_id=6, size=Decimal(1), entry_price=Decimal(100), position_value=Decimal(100),
+                            leverage=3, liquidation_price=Decimal(70), unrealized_pnl=Decimal(0),
+                            cumulative_funding=Decimal(0))
+        return SimpleNamespace(positions=(p,), margin=SimpleNamespace(total_account_value=Decimal(1000)),
+                               in_liquidation=False)
+
+    async def fetch_open_orders(self):
+        return ()
+
+
+async def test_shadow_recovery_refuses_to_start_on_an_unguarded_position():
+    """T5 / plan Decision 6: recovery would have to place a stop; shadow refuses, so recovery halts."""
+    conn, _, alerter, router = setup()
+    ex = ShadowExecutor(ShadowPositionAccount(), clock=lambda: T0)
+    router.executor = ex
+    with pytest.raises(RecoveryHalt):
+        await recover(conn=conn, run_id="r", executor=ex, routers={6: router}, alerter=alerter, clock=lambda: T0)
+    assert ("CRITICAL", "recovery_failed") in [(a[1], a[2]) for a in list_alerts(conn, "r")]
