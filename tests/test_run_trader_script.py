@@ -103,13 +103,13 @@ def test_constants_pinned():
 async def test_build_executor_builds_each_mode_with_fakes():
     mod = load()
     conn = connect(":memory:")
-    kw = dict(run_id="t", conn=conn, fee_rate=Decimal("0.0004"), equity=Decimal(1000), instrument_ids=[6])
-    sim = await mod.build_executor("sim", **kw)
+    kw = dict(conn=conn, fee_rate=Decimal("0.0004"), equity=Decimal(1000), instrument_ids=[6])
+    sim = await mod.build_executor("sim", run_id="t-sim", **kw)
     assert isinstance(sim, SimExecutor) and sim.start_equity == Decimal(1000)
-    shadow = await mod.build_executor("shadow", session=FakeAccount("1234"), **kw)
+    shadow = await mod.build_executor("shadow", run_id="t-shadow", session=FakeAccount("1234"), **kw)
     assert isinstance(shadow, ShadowExecutor) and shadow.start_equity == Decimal(1234)
     with pytest.raises(GateClosed):                      # the constructor is still the real lock
-        await mod.build_executor("live", session=FakeAccount(), **kw)
+        await mod.build_executor("live", run_id="t-live", session=FakeAccount(), **kw)
 
 
 async def test_build_executor_keeps_the_loss_baseline_across_restarts():
@@ -381,3 +381,47 @@ def test_recover_strategies_tells_open_routers_their_side():
     routers = {6: R("1", long_s), 7: R("-2", short_s), 8: R("0", flat_s), 9: R("1", plain)}
     mod._recover_strategies(routers)
     assert long_s.calls == [1] and short_s.calls == [-1] and flat_s.calls == []
+
+
+def _own(conn, run_id, executor):
+    save_account_snapshot(conn, run_id, AccountSnapshot(equity=Decimal(1000), positions=(), open_orders=(), stops={},
+                                                        in_liquidation=False, ts=T0),
+                          start_equity=Decimal(1000), executor=executor)
+
+
+async def test_sim_refuses_a_run_id_owned_by_a_shadow_executor(capsys):
+    mod = load()
+    conn = connect(":memory:")
+    _own(conn, "t", "shadow")
+    with pytest.raises(SystemExit) as e:
+        await mod.build_executor("sim", run_id="t", conn=conn, fee_rate=Decimal("0.0004"), equity=Decimal(1000),
+                                 instrument_ids=[6])
+    assert e.value.code == 2 and "run_id 't'" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("own", ["snapshot", "account", "fresh"])
+async def test_sim_starts_on_its_own_run_id(own):
+    mod = load()
+    conn = connect(":memory:")
+    if own == "snapshot":
+        _own(conn, "t", "sim")
+    elif own == "account":
+        save_sim_account(conn, "t", SimExecutor("t", equity=Decimal(1000), taker_fee_rate=Decimal("0.0004")).to_json())
+    ex = await mod.build_executor("sim", run_id="t", conn=conn, fee_rate=Decimal("0.0004"), equity=Decimal(1000),
+                                  instrument_ids=[6])
+    assert ex.name == "sim"
+
+
+def test_shadow_run_once_refuses_a_foreign_run_id_before_loading_the_wallet(monkeypatch, tmp_path):
+    mod, args, db_path = _setup(monkeypatch, tmp_path, "shadow")
+    conn = connect(db_path)
+    _own(conn, "t", "sim")
+    conn.close()
+
+    async def no_session(label):
+        raise AssertionError("the wallet key must not be loaded for a foreign run_id")
+
+    monkeypatch.setattr(mod, "open_session", no_session)
+    with pytest.raises(SystemExit) as e:
+        asyncio.run(mod.run_once(args, mod.load_settings()))
+    assert e.value.code == 2
