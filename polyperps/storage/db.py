@@ -102,6 +102,15 @@ CREATE TABLE IF NOT EXISTS positions_local (
     PRIMARY KEY (run_id, instrument_id)
 );
 CREATE TABLE IF NOT EXISTS sim_account (run_id TEXT PRIMARY KEY, json TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS hourly_rollup (
+    instrument_id INTEGER NOT NULL,
+    hour_ts       TEXT NOT NULL,      -- hour open, _ts() format (UTC ISO)
+    index_close   TEXT,               -- last native tick index_price in the hour (NULL if no native tick)
+    spread_bps    TEXT,               -- median top-of-book spread bps in the hour (NULL if no two-sided book)
+    open_mark     TEXT,               -- mark_price of the last native tick at or before hour_ts + 2 s, searched back at most 1 h; NULL if none
+    PRIMARY KEY (instrument_id, hour_ts)
+);
+
 CREATE TABLE IF NOT EXISTS account_snapshots (
     run_id TEXT PRIMARY KEY, ts TEXT NOT NULL, executor TEXT NOT NULL, start_equity TEXT NOT NULL, json TEXT NOT NULL
 );
@@ -313,18 +322,50 @@ def _floor_hour(dt: datetime) -> datetime:
 _NATIVE_TICK_SOURCES = (SourceType.POLYMARKET_WS.value, SourceType.POLYMARKET_REST.value)
 
 
+_HOUR = timedelta(hours=1)
+# Mirrors polyperps.signal.sufficiency.BAR.latency_s (2 s); that module imports this one, so it
+# cannot be imported here. tests/test_storage_phase1.py pins the two equal.
+_FILL_LATENCY = timedelta(seconds=2)
+# Late ticks (feed/WS lag) land after the hour closes; wait before freezing the hour, readers prefer the rollup.
+_ROLLUP_GRACE = timedelta(minutes=5)
+
+
+def _rollup_hours(
+    conn: sqlite3.Connection, instrument_id: int, column: str, start: datetime, end: datetime
+) -> dict[datetime, str]:
+    """hourly_rollup values (non-NULL `column`) for hours lying fully inside [start, end]."""
+    rows = conn.execute(
+        f"SELECT hour_ts, {column} FROM hourly_rollup "  # noqa: S608 - column is a literal from the callers
+        f"WHERE instrument_id=? AND hour_ts BETWEEN ? AND ? AND {column} IS NOT NULL",
+        (instrument_id, _ts(start), _ts(end)),
+    )
+    out = {}
+    for ts, v in rows:
+        h = _parse_ts(ts)
+        if h >= start and h + _HOUR - timedelta(microseconds=1) <= end:
+            out[h] = v
+    return out
+
+
 def query_last_index_by_hour(
     conn: sqlite3.Connection, instrument_id: int, *, start: datetime, end: datetime
 ) -> dict[datetime, Decimal]:
     """Last native index_price per hour in [start, end]: one seek per hour on ticks_by_time
     (the hour's newest tick), never a read of every tick. Reading all rows -- in Python or with
     GROUP BY -- took ~3 min per instrument at every paper restart on the box (I/O-bound,
-    ~3.3M rows); the seeks take ~0.2 s for 72 hours."""
+    ~3.3M rows); the seeks take ~0.2 s for 72 hours. Hours fully inside [start, end] that have an
+    hourly_rollup row (kept after prune deletes the raw ticks) come from it; partially covered hours
+    always come from ticks."""
     # ponytail: ties on the hour's newest exchange_ts pick either row (no sequence tie-break,
     # which would force reading the whole hour); add one if same-timestamp ticks ever disagree.
-    out: dict[datetime, Decimal] = {}
+    out: dict[datetime, Decimal] = {
+        h: Decimal(v) for h, v in _rollup_hours(conn, instrument_id, "index_close", start, end).items()
+    }
     hour = _floor_hour(start)
     while hour <= end:
+        if hour in out:
+            hour += _HOUR
+            continue
         lo, hi = max(hour, start), min(hour + timedelta(hours=1) - timedelta(microseconds=1), end)
         row = conn.execute(
             "SELECT index_price FROM ticks INDEXED BY ticks_by_time "
@@ -353,18 +394,83 @@ def query_book_spread_bps_by_hour(
     conn: sqlite3.Connection, instrument_id: int, *, start: datetime, end: datetime
 ) -> dict[datetime, list[Decimal]]:
     """Top-of-book spreads (bps) grouped by hour in [start, end]; snapshots missing a side are
-    skipped. Streams the cursor like query_last_index_by_hour."""
-    cur = conn.execute(
-        "SELECT exchange_ts, bids_json, asks_json FROM book_snapshots "
-        "WHERE instrument_id=? AND exchange_ts BETWEEN ? AND ? ORDER BY exchange_ts",
-        (instrument_id, _ts(start), _ts(end)),
-    )
-    out: dict[datetime, list[Decimal]] = {}
-    for ts, bids_json, asks_json in cur:
-        bps = _spread_bps(bids_json, asks_json)
-        if bps is not None:
-            out.setdefault(_floor_hour(_parse_ts(ts)), []).append(bps)
+    skipped. Streams the cursor like query_last_index_by_hour. Hours fully inside the window with
+    an hourly_rollup row come from it as a one-element list (their median); book rows are read
+    only for the remaining stretches."""
+    out: dict[datetime, list[Decimal]] = {
+        h: [Decimal(v)] for h, v in _rollup_hours(conn, instrument_id, "spread_bps", start, end).items()
+    }
+    # Contiguous runs of hours not taken from the rollup: one book query per run.
+    runs: list[list[datetime]] = []
+    first_book = conn.execute(
+        "SELECT MIN(exchange_ts) FROM book_snapshots WHERE instrument_id=?", (instrument_id,)
+    ).fetchone()[0]
+    # Hours wholly before the oldest raw book have nothing to read (they were pruned).
+    first_hour = _floor_hour(_parse_ts(first_book)) if first_book is not None else end + _HOUR
+    hour = _floor_hour(start)
+    while hour <= end:
+        if hour not in out and hour >= first_hour:
+            if runs and runs[-1][1] == hour:
+                runs[-1][1] = hour + _HOUR
+            else:
+                runs.append([hour, hour + _HOUR])
+        hour += _HOUR
+    for first, stop in runs:
+        cur = conn.execute(
+            "SELECT exchange_ts, bids_json, asks_json FROM book_snapshots "
+            "WHERE instrument_id=? AND exchange_ts BETWEEN ? AND ? ORDER BY exchange_ts",
+            (instrument_id, _ts(max(first, start)), _ts(min(stop - timedelta(microseconds=1), end))),
+        )
+        for ts, bids_json, asks_json in cur:
+            bps = _spread_bps(bids_json, asks_json)
+            if bps is not None:
+                out.setdefault(_floor_hour(_parse_ts(ts)), []).append(bps)
     return out
+
+
+def _median(xs: list[Decimal]) -> Decimal | None:
+    xs = sorted(xs)
+    n = len(xs)
+    if not n:
+        return None
+    return xs[n // 2] if n % 2 else (xs[n // 2 - 1] + xs[n // 2]) / 2
+
+
+def rollup_hours(conn: sqlite3.Connection, *, now: datetime) -> int:
+    """Write one hourly_rollup row per instrument per closed hour (hour + 1 h + grace <= now) that has
+    none yet, from the raw ticks/books; returns rows inserted. Resumes after the instrument's
+    newest rollup hour. Run before prune deletes the raw rows."""
+    rows = []
+    ids = {r[0] for r in conn.execute("SELECT DISTINCT instrument_id FROM ticks")}
+    ids |= {r[0] for r in conn.execute("SELECT DISTINCT instrument_id FROM book_snapshots")}
+    for iid in sorted(ids):
+        last = conn.execute("SELECT MAX(hour_ts) FROM hourly_rollup WHERE instrument_id=?", (iid,)).fetchone()[0]
+        firsts = [r[0] for r in (
+            conn.execute("SELECT MIN(exchange_ts) FROM ticks WHERE instrument_id=?", (iid,)).fetchone(),
+            conn.execute("SELECT MIN(exchange_ts) FROM book_snapshots WHERE instrument_id=?", (iid,)).fetchone(),
+        ) if r[0] is not None]
+        hour = _floor_hour(_parse_ts(min(firsts)))
+        if last is not None:
+            hour = max(hour, _parse_ts(last) + _HOUR)
+        while hour + _HOUR + _ROLLUP_GRACE <= now:
+            lo, hi = hour, hour + _HOUR - timedelta(microseconds=1)
+            idx = query_last_index_by_hour(conn, iid, start=lo, end=hi).get(hour)
+            spread = _median(query_book_spread_bps_by_hour(conn, iid, start=lo, end=hi).get(hour, []))
+            mark = conn.execute(
+                "SELECT mark_price FROM ticks INDEXED BY ticks_by_time "
+                "WHERE instrument_id=? AND exchange_ts BETWEEN ? AND ? AND source_type IN (?, ?) "
+                "ORDER BY exchange_ts DESC LIMIT 1",
+                (iid, _ts(hour - _HOUR), _ts(hour + _FILL_LATENCY), *_NATIVE_TICK_SOURCES),
+            ).fetchone()
+            if idx is not None or spread is not None or mark is not None:
+                rows.append((iid, _ts(hour), None if idx is None else str(idx),
+                             None if spread is None else str(spread), None if mark is None else mark[0]))
+            hour += _HOUR
+    # Write only after every slow read: an open write transaction would stall the feed's commits.
+    before = conn.total_changes
+    conn.executemany("INSERT OR IGNORE INTO hourly_rollup VALUES (?,?,?,?,?)", rows)
+    conn.commit()
+    return conn.total_changes - before
 
 
 def count_rejections(conn: sqlite3.Connection, instrument_id: int) -> dict[str, int]:

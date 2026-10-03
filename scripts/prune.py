@@ -1,4 +1,5 @@
-"""Delete ticks and book snapshots older than --days.
+"""Delete ticks and book snapshots older than --days, after rolling closed hours up into
+`hourly_rollup` (index close, median spread, open mark) so the long-range readers keep working.
 
 Tick retention was unbounded: 1.4M rows/day (~370 MB) filled the 6.7 GB EC2
 disk in 10 days and crash-looped the feed with "database or disk is full".
@@ -18,6 +19,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 
 from polyperps.config import load_settings
+from polyperps.storage.db import connect, rollup_hours
 
 TABLES = ("ticks", "book_snapshots")
 
@@ -49,6 +51,12 @@ def prune(conn: sqlite3.Connection, cutoff: datetime, batch: int = 5_000) -> dic
     return deleted
 
 
+def run(conn: sqlite3.Connection, now: datetime, days: int) -> tuple[int, dict[str, int]]:
+    """Roll up closed hours, then prune. A rollup error propagates before anything is deleted."""
+    rolled = rollup_hours(conn, now=now)
+    return rolled, prune(conn, now - timedelta(days=days))
+
+
 def vacuum_into(conn: sqlite3.Connection, db_path: str) -> None:
     """Rewrite the database to a temp file and swap it in, reclaiming freed pages."""
     tmp = db_path + ".vacuum"
@@ -68,11 +76,12 @@ def main() -> None:
     args = ap.parse_args()
 
     db_path = str(load_settings().db_path)
-    cutoff = datetime.now(timezone.utc) - timedelta(days=args.days)
-    conn = sqlite3.connect(db_path, timeout=30)
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=args.days)
+    conn = connect(db_path)
     try:
-        deleted = prune(conn, cutoff)
-        print(f"cutoff {cutoff.isoformat()}: " + ", ".join(f"{t} -{n}" for t, n in deleted.items()))
+        rolled, deleted = run(conn, now, args.days)
+        print(f"cutoff {cutoff.isoformat()}: rollup +{rolled} hours, " + ", ".join(f"{t} -{n}" for t, n in deleted.items()))
         if args.vacuum:
             before = os.path.getsize(db_path)
             vacuum_into(conn, db_path)

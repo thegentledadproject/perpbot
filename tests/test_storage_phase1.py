@@ -1,4 +1,6 @@
+import dataclasses
 import json
+import statistics
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -8,10 +10,11 @@ from polyperps.exchange.types import (
 from polyperps.storage.db import (
     connect, insert_book, insert_candle, insert_fee, insert_funding, insert_tick,
     latest_fee, query_book_spread_bps, query_book_spread_bps_by_hour, query_candles, query_funding,
-    query_last_index_by_hour, query_ticks,
+    query_last_index_by_hour, query_ticks, rollup_hours,
 )
 
 UTC = timezone.utc
+_G = timedelta(minutes=5)  # rollup grace
 T0 = datetime(2026, 9, 11, 12, 0, tzinfo=UTC)
 H = timedelta(hours=1)
 
@@ -158,3 +161,145 @@ def test_query_last_index_by_hour_window_starting_and_ending_mid_hour():
         insert_tick(conn, _tick(ts, px))
     out = query_last_index_by_hour(conn, 6, start=T0 + timedelta(minutes=20), end=T0 + H + timedelta(minutes=30))
     assert out == {T0: Decimal("101"), T0 + H: Decimal("102")}
+
+
+# ---- hourly_rollup ----
+
+def _seed_three_hours(conn):
+    for h in range(3):
+        insert_tick(conn, _tick(T0 + h * H + timedelta(minutes=10), f"10{h}.1"))
+        insert_tick(conn, _tick(T0 + h * H + timedelta(minutes=50), f"10{h}.9"))
+        insert_book(conn, _book(T0 + h * H + timedelta(minutes=5), "99.5", "100.5"))   # 100 bps
+        insert_book(conn, _book(T0 + h * H + timedelta(minutes=15), "99", "101"))      # ~200 bps
+        insert_book(conn, _book(T0 + h * H + timedelta(minutes=25), "99.9", "100.1"))  # ~20 bps
+        insert_book(conn, _book(T0 + h * H + timedelta(minutes=35), "99.8", "100.2"))  # ~40 bps (even count)
+    conn.commit()
+
+
+def _median_spreads(d):
+    return {h: statistics.median(v) for h, v in d.items()}
+
+
+def test_fill_latency_constant_matches_bar():
+    from polyperps.signal.sufficiency import BAR
+    from polyperps.storage.db import _FILL_LATENCY
+    assert _FILL_LATENCY == timedelta(seconds=BAR.latency_s)
+
+
+def test_rollup_round_trip_survives_raw_deletion():
+    conn = connect(":memory:")
+    _seed_three_hours(conn)
+    kw = dict(start=T0, end=T0 + 3 * H - timedelta(microseconds=1))
+    idx, spr = query_last_index_by_hour(conn, 6, **kw), query_book_spread_bps_by_hour(conn, 6, **kw)
+    assert len(idx) == 3 and len(spr) == 3
+    assert rollup_hours(conn, now=T0 + 3 * H + _G) == 3
+    conn.execute("DELETE FROM ticks")
+    conn.execute("DELETE FROM book_snapshots")
+    assert query_last_index_by_hour(conn, 6, **kw) == idx
+    got = query_book_spread_bps_by_hour(conn, 6, **kw)
+    assert _median_spreads(got) == _median_spreads(spr)
+
+
+def test_rollup_skips_the_open_hour():
+    conn = connect(":memory:")
+    insert_tick(conn, _tick(T0 + timedelta(minutes=1), "100"))
+    insert_tick(conn, _tick(T0 + H + timedelta(minutes=1), "101"))
+    assert rollup_hours(conn, now=T0 + H + timedelta(minutes=30) + _G) == 1
+    assert [r[0] for r in conn.execute("SELECT hour_ts FROM hourly_rollup")] == [T0.isoformat()]
+
+
+def test_rollup_is_idempotent_and_resumes_from_max_hour():
+    conn = connect(":memory:")
+    insert_tick(conn, _tick(T0 + timedelta(minutes=1), "100"))
+    assert rollup_hours(conn, now=T0 + H + _G) == 1
+    assert rollup_hours(conn, now=T0 + H + _G) == 0
+    insert_tick(conn, _tick(T0 + H + timedelta(minutes=1), "101"))
+    assert rollup_hours(conn, now=T0 + 2 * H + _G) == 1
+    assert conn.execute("SELECT COUNT(*) FROM hourly_rollup").fetchone()[0] == 2
+
+
+def test_rollup_open_mark_is_last_native_tick_within_fill_latency():
+    conn = connect(":memory:")
+    def mk(ts, mark, st=SourceType.POLYMARKET_WS):
+        t = _tick(ts, "100", st)
+        return dataclasses.replace(t, mark_price=Decimal(mark))
+    insert_tick(conn, mk(T0 - timedelta(minutes=30), "90"))
+    insert_tick(conn, mk(T0 + timedelta(seconds=1), "91"))
+    insert_tick(conn, mk(T0 + timedelta(seconds=1, milliseconds=500), "93", SourceType.PROXY_HYPERLIQUID))  # ignored
+    insert_tick(conn, mk(T0 + timedelta(seconds=3), "94"))                                                 # after T0+2s
+    insert_tick(conn, mk(T0 + H + timedelta(seconds=2), "95"))                                             # boundary is inclusive
+    conn.commit()
+    rollup_hours(conn, now=T0 + 2 * H + _G)
+    rows = dict(conn.execute("SELECT hour_ts, open_mark FROM hourly_rollup"))
+    assert rows[T0.isoformat()] == "91"
+    assert rows[(T0 + H).isoformat()] == "95"
+
+
+def test_rollup_open_mark_null_without_native_tick_in_window():
+    conn = connect(":memory:")
+    insert_tick(conn, _tick(T0 - 2 * H, "100"))                          # too old for hour T0
+    insert_tick(conn, _tick(T0 + timedelta(seconds=3), "101"))           # too new for hour T0
+    rollup_hours(conn, now=T0 + H + _G)
+    row = conn.execute("SELECT index_close, open_mark FROM hourly_rollup WHERE hour_ts=?", (T0.isoformat(),)).fetchone()
+    assert row == ("101", None)
+
+
+def test_reader_mixes_rollup_hours_with_raw_hours():
+    conn = connect(":memory:")
+    insert_tick(conn, _tick(T0 + timedelta(minutes=10), "100"))
+    insert_book(conn, _book(T0 + timedelta(minutes=5), "99.5", "100.5"))
+    conn.commit()
+    rollup_hours(conn, now=T0 + H + _G)
+    conn.execute("DELETE FROM ticks")
+    conn.execute("DELETE FROM book_snapshots")
+    insert_tick(conn, _tick(T0 + H + timedelta(minutes=10), "105"))
+    insert_book(conn, _book(T0 + H + timedelta(minutes=5), "99", "101"))
+    kw = dict(start=T0, end=T0 + 2 * H - timedelta(microseconds=1))
+    assert query_last_index_by_hour(conn, 6, **kw) == {T0: Decimal("100"), T0 + H: Decimal("105")}
+    spr = query_book_spread_bps_by_hour(conn, 6, **kw)
+    assert set(spr) == {T0, T0 + H} and len(spr[T0]) == 1
+
+
+def test_reader_mid_hour_window_ignores_rollup_row():
+    conn = connect(":memory:")
+    insert_tick(conn, _tick(T0 + timedelta(minutes=10), "100"))
+    insert_tick(conn, _tick(T0 + timedelta(minutes=50), "101"))
+    insert_book(conn, _book(T0 + timedelta(minutes=5), "99.5", "100.5"))
+    conn.commit()
+    rollup_hours(conn, now=T0 + H + _G)
+    out = query_last_index_by_hour(conn, 6, start=T0 + timedelta(minutes=5), end=T0 + timedelta(minutes=30))
+    assert out == {T0: Decimal("100")}                # not the rollup's 101
+    assert query_book_spread_bps_by_hour(conn, 6, start=T0 + timedelta(minutes=10), end=T0 + timedelta(minutes=30)) == {}
+
+
+def test_rollup_waits_for_the_grace_period():
+    conn = connect(":memory:")
+    insert_tick(conn, _tick(T0 + timedelta(minutes=1), "100"))
+    assert rollup_hours(conn, now=T0 + H + timedelta(minutes=4)) == 0
+    assert rollup_hours(conn, now=T0 + H + timedelta(minutes=5)) == 1
+
+
+def test_rollup_holds_no_write_transaction_while_reading(monkeypatch):
+    import polyperps.storage.db as dbm
+    conn = connect(":memory:")
+    for h in range(3):
+        insert_tick(conn, _tick(T0 + h * H + timedelta(minutes=1), "100"))
+    conn.commit()
+    seen = []
+    real = dbm.query_last_index_by_hour
+
+    def spy(c, *a, **k):
+        seen.append(c.in_transaction)
+        return real(c, *a, **k)
+    monkeypatch.setattr(dbm, "query_last_index_by_hour", spy)
+    assert rollup_hours(conn, now=T0 + 3 * H + _G) == 3
+    assert seen and not any(seen)
+
+
+def test_rollup_skips_empty_hours_before_the_first_raw_row():
+    conn = connect(":memory:")
+    insert_tick(conn, _tick(T0 + timedelta(minutes=1), "100"))
+    rollup_hours(conn, now=T0 + 2 * H + _G)
+    # late history older than the rollup's max hour is never re-walked, and gaps start at the first raw row
+    insert_tick(conn, _tick(T0 + 10 * H + timedelta(minutes=1), "101"))
+    assert rollup_hours(conn, now=T0 + 11 * H + _G) == 1
