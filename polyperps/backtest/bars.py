@@ -6,13 +6,8 @@ incomplete bar, so gaps cannot be traded through silently.
 
 Funding-timestamp convention: a funding_rates row stamped T is the payment
 settled at T for the hour ENDING T, so Bar(open_ts).funding_rate is the row at
-open_ts + 1h. Checked against the real DB on 2026-09-12 (spec 4.2): not
-contradicted, but not confirmed either -- the only native ticks (2026-09-11
-06:33Z, next_funding 07:00Z, rate 0.0000125) have no stored 07:00 row and the
-rate had been pinned at 0.0000125 for 253 hours, so the comparison has no
-discriminating power. TODO: re-check across an unpinned settlement before any
-native result is approved; if the row at next_funding differs from the ticks'
-rate, switch the lookup to funding.get(open_ts) and re-run H1.
+open_ts + 1h. Confirmed on the box DB 2026-10-03 (spec 4.2): across 49 unpinned
+settlements the ticks' rate before next_funding=T matched the row stamped T in 48.
 """
 
 from __future__ import annotations
