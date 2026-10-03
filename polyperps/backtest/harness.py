@@ -1,7 +1,7 @@
 """Event-driven hourly backtest (spec 5.2), following the live router's rules (Phase 2b Part A §6).
 
 Point-in-time: the strategy receives bars[:t+1]. Fills happen at the 1-minute close latency_s
-after the NEXT bar opens; no minute candle -> the hourly open (counted). At each bar, in order:
+after the NEXT bar opens; no minute candle -> the last 1m close at or before that minute if <= 60 min old (counted), else the hourly open (counted); fill_fallback="hourly_open" skips the last-trade step (the robustness run). At each bar, in order:
   1. the 15 % stop fires intrabar when the bar's high/low crosses it, at the stop price;
   2. funding is paid on the position's value at the bar close;
   3. a bar that is not complete exits to flat at its close and never enters (a next bar with no
@@ -16,6 +16,7 @@ the guards use the router's 3x liquidation price.
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -34,8 +35,8 @@ _Q = Decimal("0.00000001")
 
 # Bump on any change to the harness's trading rules or cost model. Validation records carry it and
 # the live gate (signal.base) accepts only records at the current version.
-# 1 = Phase 1 harness (flip in one fill, no guards); 2 = Part A router parity.
-HARNESS_VERSION = 2
+# 1 = Phase 1 harness (flip in one fill, no guards); 2 = Part A router parity; 3 = amendments A+B (one-sided CI; last-trade fill fallback, spec 8.4).
+HARNESS_VERSION = 3
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -64,6 +65,8 @@ class BacktestResult:
     fills: int = 0
     fills_unavailable: int = 0
     fills_at_hourly_open: int = 0
+    fills_at_last_trade: int = 0
+    max_last_trade_age_min: int = 0
 
 
 def _sign(x: Decimal) -> int:
@@ -116,10 +119,13 @@ def run_backtest(
     latency_s: int = BAR.latency_s,
     impact_bps: Decimal = BAR.impact_bps,
     notional: Decimal = BAR.notional_usd,
+    fill_fallback: Literal["last_trade", "hourly_open"] = "last_trade",
+    last_trade_max_age_min: int = BAR.last_trade_max_age_min,
 ) -> BacktestResult:
     res = BacktestResult(
         params={"taker_fee_rate": str(taker_fee_rate), "latency_s": str(latency_s),
                 "impact_bps": str(impact_bps), "notional": str(notional), "warmup": str(warmup),
+                "fill_fallback": fill_fallback,
                 "strategy": strategy.name,
                 "strategy_params": {k: str(v) for k, v in strategy.params.items()}},
         bars_total=len(bars),
@@ -128,6 +134,13 @@ def run_backtest(
     )
     book = _Book(notional)
     latency = timedelta(seconds=latency_s)
+    # Amendment B (spec 8.4): most recent 1m close at or before the fill minute, if fresh enough.
+    minute_keys = sorted(minute_closes) if fill_fallback == "last_trade" else []
+    max_age = timedelta(minutes=last_trade_max_age_min)
+
+    def last_trade(at: datetime) -> datetime | None:
+        i = bisect_right(minute_keys, at) - 1
+        return minute_keys[i] if i >= 0 and at - minute_keys[i] <= max_age else None
     last_equity = Decimal(0)  # equity starts at 0, so the first mark's return includes entry costs
 
     def log(ts: datetime, kind: Kind, price: Decimal | None, cash_delta: Decimal, note: str = "") -> None:
@@ -227,9 +240,17 @@ def run_backtest(
             target = Decimal(0)
         if target != book.position:
             fill_ts = nxt.open_ts + latency
-            price = minute_closes.get(floor_minute(fill_ts))
+            fill_minute = floor_minute(fill_ts)
+            price = minute_closes.get(fill_minute)
+            last = last_trade(fill_minute) if price is None else None
             if price is not None:
                 trade_to(target, price, bar.spread_bps, nxt.open_ts, "fill")
+            elif last is not None:
+                age = int((fill_minute - last).total_seconds() // 60)
+                res.fills_at_last_trade += 1
+                res.max_last_trade_age_min = max(res.max_last_trade_age_min, age)
+                trade_to(target, minute_closes[last], bar.spread_bps, nxt.open_ts, "fill",
+                         note=f"fill_source=last_trade age_min={age}")
             elif nxt.open is not None:
                 # Spec amendment (Task 5): proxy 1m candles exist for ~3.5 days only.
                 # Fall back to the hourly open and COUNT it so records show the reliance.

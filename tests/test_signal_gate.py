@@ -115,4 +115,4 @@ def test_record_from_an_older_harness_is_rejected(tmp_path):
 
 
 def test_harness_version_pinned():
-    assert HARNESS_VERSION == 2
+    assert HARNESS_VERSION == 3
