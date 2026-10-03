@@ -326,6 +326,8 @@ _HOUR = timedelta(hours=1)
 # Mirrors polyperps.signal.sufficiency.BAR.latency_s (2 s); that module imports this one, so it
 # cannot be imported here. tests/test_storage_phase1.py pins the two equal.
 _FILL_LATENCY = timedelta(seconds=2)
+# Late ticks (feed/WS lag) land after the hour closes; wait before freezing the hour, readers prefer the rollup.
+_ROLLUP_GRACE = timedelta(minutes=5)
 
 
 def _rollup_hours(
@@ -400,9 +402,14 @@ def query_book_spread_bps_by_hour(
     }
     # Contiguous runs of hours not taken from the rollup: one book query per run.
     runs: list[list[datetime]] = []
+    first_book = conn.execute(
+        "SELECT MIN(exchange_ts) FROM book_snapshots WHERE instrument_id=?", (instrument_id,)
+    ).fetchone()[0]
+    # Hours wholly before the oldest raw book have nothing to read (they were pruned).
+    first_hour = _floor_hour(_parse_ts(first_book)) if first_book is not None else end + _HOUR
     hour = _floor_hour(start)
     while hour <= end:
-        if hour not in out:
+        if hour not in out and hour >= first_hour:
             if runs and runs[-1][1] == hour:
                 runs[-1][1] = hour + _HOUR
             else:
@@ -430,23 +437,22 @@ def _median(xs: list[Decimal]) -> Decimal | None:
 
 
 def rollup_hours(conn: sqlite3.Connection, *, now: datetime) -> int:
-    """Write one hourly_rollup row per instrument per closed hour (hour + 1 h <= now) that has
+    """Write one hourly_rollup row per instrument per closed hour (hour + 1 h + grace <= now) that has
     none yet, from the raw ticks/books; returns rows inserted. Resumes after the instrument's
     newest rollup hour. Run before prune deletes the raw rows."""
-    inserted = 0
+    rows = []
     ids = {r[0] for r in conn.execute("SELECT DISTINCT instrument_id FROM ticks")}
     ids |= {r[0] for r in conn.execute("SELECT DISTINCT instrument_id FROM book_snapshots")}
     for iid in sorted(ids):
         last = conn.execute("SELECT MAX(hour_ts) FROM hourly_rollup WHERE instrument_id=?", (iid,)).fetchone()[0]
+        firsts = [r[0] for r in (
+            conn.execute("SELECT MIN(exchange_ts) FROM ticks WHERE instrument_id=?", (iid,)).fetchone(),
+            conn.execute("SELECT MIN(exchange_ts) FROM book_snapshots WHERE instrument_id=?", (iid,)).fetchone(),
+        ) if r[0] is not None]
+        hour = _floor_hour(_parse_ts(min(firsts)))
         if last is not None:
-            hour = _parse_ts(last) + _HOUR
-        else:
-            firsts = [r[0] for r in (
-                conn.execute("SELECT MIN(exchange_ts) FROM ticks WHERE instrument_id=?", (iid,)).fetchone(),
-                conn.execute("SELECT MIN(exchange_ts) FROM book_snapshots WHERE instrument_id=?", (iid,)).fetchone(),
-            ) if r[0] is not None]
-            hour = _floor_hour(_parse_ts(min(firsts)))
-        while hour + _HOUR <= now:
+            hour = max(hour, _parse_ts(last) + _HOUR)
+        while hour + _HOUR + _ROLLUP_GRACE <= now:
             lo, hi = hour, hour + _HOUR - timedelta(microseconds=1)
             idx = query_last_index_by_hour(conn, iid, start=lo, end=hi).get(hour)
             spread = _median(query_book_spread_bps_by_hour(conn, iid, start=lo, end=hi).get(hour, []))
@@ -457,14 +463,14 @@ def rollup_hours(conn: sqlite3.Connection, *, now: datetime) -> int:
                 (iid, _ts(hour - _HOUR), _ts(hour + _FILL_LATENCY), *_NATIVE_TICK_SOURCES),
             ).fetchone()
             if idx is not None or spread is not None or mark is not None:
-                inserted += conn.execute(
-                    "INSERT OR IGNORE INTO hourly_rollup VALUES (?,?,?,?,?)",
-                    (iid, _ts(hour), None if idx is None else str(idx),
-                     None if spread is None else str(spread), None if mark is None else mark[0]),
-                ).rowcount
+                rows.append((iid, _ts(hour), None if idx is None else str(idx),
+                             None if spread is None else str(spread), None if mark is None else mark[0]))
             hour += _HOUR
+    # Write only after every slow read: an open write transaction would stall the feed's commits.
+    before = conn.total_changes
+    conn.executemany("INSERT OR IGNORE INTO hourly_rollup VALUES (?,?,?,?,?)", rows)
     conn.commit()
-    return inserted
+    return conn.total_changes - before
 
 
 def count_rejections(conn: sqlite3.Connection, instrument_id: int) -> dict[str, int]:
