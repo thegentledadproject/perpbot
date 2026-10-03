@@ -1,4 +1,4 @@
-# DRAFT: sufficiency-bar amendments A and B (not in effect)
+# Sufficiency-bar amendments A and B (approved 2026-10-03)
 
 Date: 2026-10-03. Status: **APPROVED 2026-10-03, implemented as harness_version 3** (spec §8.4). The monthly re-check is an operator step (README), not part of scripts/sufficiency.py.
 Amends `docs/superpowers/specs/2026-09-11-polyperps-phase1-design.md` §5.2, §7, §8.1, §8.3 and

@@ -87,7 +87,7 @@ def main() -> None:
     settings = load_settings()
     conn = db.connect(settings.db_path)
     now = datetime.now(timezone.utc)
-    end = args.end or now
+    end = min(args.end or now, now)  # a future end would make later-window revocation impossible
     source = _SOURCES[args.source]
     try:
         fee = db.latest_fee(conn, args.fee_category)

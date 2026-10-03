@@ -205,7 +205,7 @@ Full reasoning: `docs/superpowers/specs/2026-10-03-bar-amendments-draft.md`. Imp
 | 200 | 60 | 4.8 | 2.1 |
 | 400 | 120 | 3.4 | 1.5 |
 
-A pass is provisional. The gate (`load_validated`) is `False` if any native record at the current `harness_version` for the same hypothesis (case-insensitive) and the same instrument (compared as strings) did not pass (`passed is not True`) and has a data-window `end` later than the approved record's. A record whose `end` is missing, unparseable or timezone-naive also revokes (fail closed), and an approved record whose own `end` is unplaceable is never accepted. File order is irrelevant. `passed` and the gate also require `robust_screened is True`. Part B sizing starts from the smallest size the exchange allows until a pass survives a re-run at >= 100 tested days (decided in the Part B spec).
+A pass is provisional. The gate (`load_validated`) is `False` if any native record at the current `harness_version` for the same hypothesis (case-insensitive) and the same instrument (compared as strings) did not pass (`passed is not True`) and has a data-window `end` later than the approved record's. A record whose `end` is missing, unparseable or timezone-naive also revokes (fail closed), and an approved record whose own `end` is unplaceable is never accepted. `run_backtest.py` clamps `end` to the run time, and the gate rejects an approved record whose `end` is after its own `ts`, so a future `--end` cannot make revocation impossible. File order is irrelevant. `passed` and the gate also require `robust_screened is True`. Part B sizing starts from the smallest size the exchange allows until a pass survives a re-run at >= 100 tested days (decided in the Part B spec).
 
 The re-check is an operator step, not automatic: re-run `scripts/run_backtest.py --source native` monthly for each approved hypothesis and instrument, alongside `scripts/sufficiency.py`.
 
@@ -231,7 +231,7 @@ Skipped: pricing from the tick feed's mark at HH:00:02 (ticks are kept 3 days); 
 Synthetic, deterministic, no network:
 - **Point-in-time**: recording strategy proves `len(history) == t + 1` on every call; harness never passes a bar beyond `t`.
 - **Gap rule**: a series with an incomplete bar forces a flatten and blocks re-entry until the next complete bar.
-- **Fill fallback**: no minute candle at `open_ts + latency` → fill at the next bar's hourly open, `fills_at_hourly_open` incremented; a complete bar with no `open` → `fill_unavailable`, position unchanged.
+- **Fill fallback**: no minute candle at `open_ts + latency` → fill at the last 1-minute close if at most 60 min old (`fills_at_last_trade`, §8.4), else at the next bar's hourly open, `fills_at_hourly_open` incremented; a complete bar with no `open` → `fill_unavailable`, position unchanged.
 - **Costs**: hand-computed expected costs for a known delta/spread/fee.
 - **Funding sign**: long position with positive funding loses exactly `notional × rate`.
 - **H1 sanity**: a constructed series where funding spikes then decays must be profitable net of costs on H1 with the pre-registered grid; a constant-funding series must trade never.

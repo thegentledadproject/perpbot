@@ -152,3 +152,12 @@ def test_same_end_reproduces_holdout_and_dataset_and_trims_trailing_incomplete(t
     assert a["dataset"]["bars"] == a["dataset"]["complete_bars"] == 400
     assert a["dataset"]["tested_days"] == "16.67"  # 400 h / 24, quantised to 0.01
     assert a["dataset"]["holdout_bars"] == 120
+
+
+def test_future_end_is_clamped_to_run_time(tmp_path, monkeypatch):
+    db_path = tmp_path / "t.sqlite3"
+    log_path = tmp_path / "log.jsonl"
+    _seed_db(db_path, n_bars=400, with_fee=True)
+    _run(monkeypatch, db_path, log_path, "--end", "2030-01-01T00:00:00+00:00")
+    (record,) = read_records(path=log_path)
+    assert record["end"] == record["ts"]

@@ -19,7 +19,8 @@ def _files(tmp_path, *, record=None, validated=None):
 
 PASSING = {"run_id": "r1", "passed": True, "source_type": "polymarket_rest", "harness_version": HARNESS_VERSION,
            "sufficiency": {"met": True, "shortfall": {}}, "holdout": {"fills_at_hourly_open": 0},
-           "robust_screened": True, "hypothesis": "h1", "instrument_id": 6, "end": "2026-10-12T00:00:00+00:00"}
+           "robust_screened": True, "hypothesis": "h1", "instrument_id": 6, "end": "2026-10-12T00:00:00+00:00",
+           "ts": "2026-10-12T00:05:00+00:00"}
 APPROVAL = {"run_id": "r1", "approved_by": "lockheng", "approved_at": "2026-11-05T00:00:00+00:00", "note": "ok"}
 
 
@@ -203,3 +204,23 @@ def test_later_failure_matches_by_value_and_file_order_is_irrelevant(tmp_path):
     d.mkdir()
     log, val = _log(d, [LATER_FAIL, PASSING])
     assert load_validated(validated_path=val, log_path=log) is False
+
+
+def test_approved_record_with_end_after_ts_or_bad_ts_is_false(tmp_path):
+    cases = [{**PASSING, "end": "2030-01-01T00:00:00+00:00"},   # window end in the future of the run itself
+             {k: v for k, v in PASSING.items() if k != "ts"},
+             {**PASSING, "ts": "garbage"}, {**PASSING, "ts": "2026-10-12T00:05:00"}, {**PASSING, "ts": None}]
+    for i, bad in enumerate(cases):
+        d = tmp_path / str(i)
+        d.mkdir()
+        log, val = _log(d, [bad])
+        assert load_validated(validated_path=val, log_path=log) is False, bad
+
+
+def test_later_failure_with_string_version_or_uppercase_source_revokes(tmp_path):
+    for i, fail in enumerate([{**LATER_FAIL, "harness_version": str(HARNESS_VERSION)},
+                              {**LATER_FAIL, "source_type": "POLYMARKET_REST"}]):
+        d = tmp_path / str(i)
+        d.mkdir()
+        log, val = _log(d, [PASSING, fail])
+        assert load_validated(validated_path=val, log_path=log) is False, fail

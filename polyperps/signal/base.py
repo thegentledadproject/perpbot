@@ -56,8 +56,9 @@ def _record_passes(record: dict, run_id: str) -> bool:
     if not (isinstance(record.get("end"), str) and isinstance(record.get("hypothesis"), str)
             and type(record.get("instrument_id")) is int):
         return False   # cannot be placed in time, so revocation could not be checked
-    if _aware(record["end"]) is None:
-        return False   # an unparseable or naive end could never be revoked
+    end, ts = _aware(record["end"]), _aware(record.get("ts"))
+    if end is None or ts is None or end > ts:
+        return False   # unplaceable end, or a window ending after the run itself: later runs could never revoke it
     holdout = record.get("holdout")
     if not isinstance(holdout, dict):
         return False
@@ -80,8 +81,8 @@ def _revokes(later: dict, approved: dict) -> bool:
     same hypothesis and instrument, on a LATER data window, that did not pass, closes the gate."""
     if not (later.get("hypothesis") is not None and str(later["hypothesis"]).lower() == approved["hypothesis"].lower()
             and str(later.get("instrument_id")) == str(approved["instrument_id"])
-            and later.get("harness_version") == HARNESS_VERSION
-            and later.get("source_type") in _NATIVE_VALUES
+            and str(later.get("harness_version")) == str(HARNESS_VERSION)
+            and str(later.get("source_type")).lower() in _NATIVE_VALUES
             and later.get("passed") is not True):
         return False
     end = _aware(later.get("end"))
