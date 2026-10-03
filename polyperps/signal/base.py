@@ -9,7 +9,9 @@ It is derived, never assigned by hand:
          AND, re-checked from the record itself (defence in depth, spec 8.3):
              source_type is native, sufficiency.met is True, and
              holdout.fills_at_hourly_open == 0
+             and robust_screened is True,
              and harness_version == the current HARNESS_VERSION (Part A §6.6)
+         AND no later-window native record for the same hypothesis/instrument at this harness failed (provisional pass, spec 8.4).
          AND validated.json carries non-empty approved_by and approved_at.
 
 Two keys: code writes the passing record; a human commits the approval.
@@ -21,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -48,12 +51,31 @@ def _record_passes(record: dict, run_id: str) -> bool:
     sufficiency = record.get("sufficiency")
     if not isinstance(sufficiency, dict) or sufficiency.get("met") is not True:
         return False
+    if record.get("robust_screened") is not True:
+        return False   # amendment B: must also clear with last-trade fills at the hourly open
+    if not (isinstance(record.get("end"), str) and isinstance(record.get("hypothesis"), str)
+            and type(record.get("instrument_id")) is int):
+        return False   # cannot be placed in time, so revocation could not be checked
     holdout = record.get("holdout")
     if not isinstance(holdout, dict):
         return False
     fallback_fills = holdout.get("fills_at_hourly_open")
     # exact int 0 only: JSON false/None/"0" must not read as zero fills
     return type(fallback_fills) is int and fallback_fills == 0
+
+
+def _revokes(later: dict, approved: dict) -> bool:
+    """Amendment A (spec 8.4): a pass is provisional. A native record at the current harness for the
+    same hypothesis and instrument, on a LATER data window, that did not pass, closes the gate."""
+    try:
+        newer = datetime.fromisoformat(later["end"]) > datetime.fromisoformat(approved["end"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return (newer and later.get("hypothesis") == approved["hypothesis"]
+            and later.get("instrument_id") == approved["instrument_id"]
+            and later.get("harness_version") == HARNESS_VERSION
+            and later.get("source_type") in _NATIVE_VALUES
+            and later.get("passed") is not True)
 
 
 def load_validated(*, validated_path: Path = VALIDATED_PATH, log_path: Path = LOG_PATH) -> bool:
@@ -69,7 +91,9 @@ def load_validated(*, validated_path: Path = VALIDATED_PATH, log_path: Path = LO
         ):
             return False
         run_id = approval["run_id"].strip()
-        return any(_record_passes(r, run_id) for r in read_records(path=log_path))
+        records = read_records(path=log_path)
+        approved = next((r for r in records if _record_passes(r, run_id)), None)
+        return approved is not None and not any(_revokes(r, approved) for r in records)
     except Exception as exc:  # never crash an import over the gate file
         log.warning("validated.json unreadable (%s); SIGNAL_VALIDATED stays False", type(exc).__name__)
         return False

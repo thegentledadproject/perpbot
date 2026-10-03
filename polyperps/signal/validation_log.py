@@ -6,6 +6,8 @@ whose holdout statistics cleared it. Proxy runs can only be `screened`.
 Amendment 2026-09-12 (spec 8.3, pre-registered before any native result):
 `passed` additionally requires zero hourly-open fallback fills on the holdout
 and a tested span of at least BAR.min_days. `screened` is unchanged.
+
+Amendment 2026-10-03 (spec 8.4): `passed` also requires robust_screened - the holdout re-run with every last-trade fill priced at the hourly open clears the bar too.
 """
 
 from __future__ import annotations
@@ -61,6 +63,7 @@ def evaluate_run(
     ci_hi: float | None,
     holdout_fills_at_hourly_open: int,
     tested_days: Decimal,
+    robust_screened: bool,
     bar: SufficiencyBar = BAR,
 ) -> tuple[bool, bool]:
     if ci_lo is None or ci_hi is None:
@@ -74,5 +77,6 @@ def evaluate_run(
         and sufficiency.met
         and holdout_fills_at_hourly_open == 0   # every holdout fill priced off a real 1m candle
         and tested_days >= bar.min_days          # the span actually backtested, not just stored
+        and robust_screened  # amendment B: also clears with every last-trade fill at the hourly open
     )
     return screened, passed

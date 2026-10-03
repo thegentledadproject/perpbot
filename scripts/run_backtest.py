@@ -35,7 +35,7 @@ from polyperps.backtest.stats import (
 )
 from polyperps.config import load_settings
 from polyperps.exchange.types import SourceType
-from polyperps.signal.sufficiency import BAR, check_dataset
+from polyperps.signal.sufficiency import BAR, check_dataset, stats_clear_bar, two_sided_level
 from polyperps.signal.validation_log import LOG_PATH, append_record, evaluate_run, make_run_id
 from polyperps.storage import db
 from polyperps.strategies import GRIDS, build_strategy
@@ -55,13 +55,15 @@ def _stats(res, *, bootstrap: bool, seed: int) -> dict:
         "fills": res.fills,
         "fills_unavailable": res.fills_unavailable,
         "fills_at_hourly_open": res.fills_at_hourly_open,
+        "fills_at_last_trade": res.fills_at_last_trade,
+        "max_last_trade_age_min": res.max_last_trade_age_min,
         "bars_constant_spread": res.bars_constant_spread,
         "final_equity": str(res.equity[-1][1]) if res.equity else "0",
     }
     if bootstrap:
         try:
             lo, hi = block_bootstrap_ci(res.returns, block_len=BAR.block_len, resamples=BAR.resamples,
-                                        ci=float(BAR.bootstrap_ci), seed=seed)
+                                        ci=two_sided_level(), seed=seed)  # (lo, hi) = 20th/80th percentiles; lo is the one-sided 80 % bound (spec 8.4)
             out["ci_lo"], out["ci_hi"] = lo, hi
         except ValueError as exc:
             out["ci_lo"], out["ci_hi"] = None, None
@@ -127,6 +129,13 @@ def main() -> None:
         hres = run_backtest(hold_input, strat, minute_closes=minute_closes, taker_fee_rate=fee.taker_fee_rate,
                             warmup=strat.warmup)
         hstats = _stats(hres, bootstrap=True, seed=args.seed)
+        # Amendment B robustness run: the same holdout with every last-trade fill at the hourly open.
+        rres = run_backtest(hold_input, build_strategy(args.hypothesis, best_params, proxy_close_by_hour=proxy_closes),
+                            minute_closes=minute_closes, taker_fee_rate=fee.taker_fee_rate,
+                            warmup=strat.warmup, fill_fallback="hourly_open")
+        rstats = _stats(rres, bootstrap=True, seed=args.seed)
+        robust_screened = rstats["ci_lo"] is not None and stats_clear_bar(oos_sharpe=rstats["sharpe"],
+                                                                          ci_lo=rstats["ci_lo"])
 
         suff = check_dataset(conn, args.instrument, source, now=end)
         tested_start, tested_end = bars[0].open_ts, bars[-1].open_ts + HOUR  # close of the last bar
@@ -134,7 +143,7 @@ def main() -> None:
         screened, passed = evaluate_run(source_type=source, sufficiency=suff,
                                         holdout_sharpe=hstats["sharpe"], ci_lo=hstats["ci_lo"], ci_hi=hstats["ci_hi"],
                                         holdout_fills_at_hourly_open=hstats["fills_at_hourly_open"],
-                                        tested_days=tested_days)
+                                        tested_days=tested_days, robust_screened=robust_screened)
         record = {
             "run_id": make_run_id(now, args.hypothesis, args.instrument, source),
             "ts": now.isoformat(),
@@ -155,6 +164,7 @@ def main() -> None:
             "fee_fetched_at": fee.fetched_at.isoformat(),
             "latency_s": BAR.latency_s, "impact_bps": str(BAR.impact_bps), "seed": args.seed,
             "train": best_train, "holdout": hstats,
+            "holdout_robust": rstats, "robust_screened": robust_screened,
             "sufficiency": {"met": suff.met, "shortfall": suff.shortfall},
             "screened": screened, "passed": passed,
         }
@@ -162,7 +172,7 @@ def main() -> None:
         ci_lo, ci_hi = hstats["ci_lo"], hstats["ci_hi"]
         ci_str = f"({ci_lo:.5f},{ci_hi:.5f})" if ci_lo is not None and ci_hi is not None else "(n/a)"
         print(f"{record['run_id']}: params={best_params} holdout_sharpe={hstats['sharpe']:.2f} "
-              f"ci={ci_str} screened={screened} passed={passed}")
+              f"ci={ci_str} screened={screened} passed={passed} robust_screened={robust_screened}")
         if suff.shortfall:
             print(f"  sufficiency shortfall: {suff.shortfall}")
     finally:
