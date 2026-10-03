@@ -259,3 +259,50 @@ def test_funding_cost_guard_exits_at_the_close():
                        impact_bps=Decimal(0))
     (guard,) = [r for r in res.ledger if r.kind == "guard_exit"]
     assert guard.ts == T0 + 3 * H and guard.position == 0     # 2.4 paid >= 2 % of 100 at bar 2's close
+
+
+M = timedelta(minutes=1)
+
+
+def _fill(res):
+    (fill,) = [r for r in res.ledger if r.kind == "fill"]
+    return fill
+
+
+def test_missing_fill_minute_uses_last_trade_before_it_and_counts_it():
+    # fill instant = T0+H+2s; its minute T0+H has no candle; last trade at T0+H-3m
+    bars = [bar(0), bar(1, close="103"), bar(2)]
+    res = run_backtest(bars, Const(1), minute_closes={T0 + H - 3 * M: Decimal("101")}, taker_fee_rate=FEE, warmup=0)
+    fill = _fill(res)
+    assert fill.price == Decimal("101") and fill.note == "fill_source=last_trade age_min=3"
+    assert res.fills_at_last_trade == 1 and res.fills_at_hourly_open == 0 and res.max_last_trade_age_min == 3
+
+
+def test_last_trade_exactly_max_age_is_used_one_minute_older_is_not():
+    bars = [bar(0), bar(1, close="103"), bar(2)]
+    at_cap = run_backtest(bars, Const(1), minute_closes={T0 + H - 60 * M: Decimal("101")}, taker_fee_rate=FEE, warmup=0)
+    assert _fill(at_cap).price == Decimal("101") and at_cap.max_last_trade_age_min == 60
+    too_old = run_backtest(bars, Const(1), minute_closes={T0 + H - 61 * M: Decimal("101")}, taker_fee_rate=FEE, warmup=0)
+    assert _fill(too_old).price == Decimal("103") and too_old.fills_at_hourly_open == 1 and too_old.fills_at_last_trade == 0
+
+
+def test_a_trade_after_the_fill_minute_is_never_used():
+    # no look-ahead: only a later minute exists -> hourly open
+    bars = [bar(0), bar(1, close="103"), bar(2)]
+    res = run_backtest(bars, Const(1), minute_closes={T0 + H + 5 * M: Decimal("999")}, taker_fee_rate=FEE, warmup=0)
+    assert _fill(res).price == Decimal("103") and res.fills_at_hourly_open == 1 and res.fills_at_last_trade == 0
+
+
+def test_hourly_open_mode_ignores_the_last_trade():
+    bars = [bar(0), bar(1, close="103"), bar(2)]
+    res = run_backtest(bars, Const(1), minute_closes={T0 + H - 3 * M: Decimal("101")}, taker_fee_rate=FEE, warmup=0,
+                       fill_fallback="hourly_open")
+    assert _fill(res).price == Decimal("103") and res.fills_at_hourly_open == 1 and res.fills_at_last_trade == 0
+    assert res.params["fill_fallback"] == "hourly_open"
+
+
+def test_fill_minute_candle_still_wins_over_last_trade():
+    bars = [bar(0), bar(1, close="103"), bar(2)]
+    mc = {T0 + H - 3 * M: Decimal("101"), T0 + H: Decimal("102")}
+    res = run_backtest(bars, Const(1), minute_closes=mc, taker_fee_rate=FEE, warmup=0)
+    assert _fill(res).price == Decimal("102") and _fill(res).note == "" and res.fills_at_last_trade == 0

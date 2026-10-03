@@ -107,7 +107,7 @@ For each bar index `t` from `warmup` to `len(bars) - 2`:
 1. **Funding**: if a position is open and `bars[t].funding_rate` is not None, cash += `-position × NOTIONAL × funding_rate` (longs pay when positive).
 2. **Gap rule**: if `bars[t+1].complete` is False, flatten at bar `t` close with full costs and skip the strategy call; do not re-enter until the next complete bar.
 3. **Decision**: `target = strategy.target(bars[:t+1])`, clamped to `[-1, 1]`.
-4. **Fill**: if `target != position`, fill the delta at `fill_price = minute_close_at(bars[t+1].open_ts + LATENCY_S)` (the close of the 1-minute candle containing that instant, same source). **Amendment 2026-09-11 (Task 5 finding):** Hyperliquid retains only ~5,000 candles per interval, so 1-minute candles exist for ~3.5 days only; refusing every other fill would make proxy screening impossible. When no minute candle exists at that instant the fill uses the next bar's hourly `open` instead, is tagged `fill_source="hourly_open"`, and is counted in `fills_at_hourly_open`; the validation-log record carries that count so a reader sees how much of a result rests on the fallback. 2 s of drift is far below the pre-registered half-spread + 5 bps impact already charged. `fill_unavailable` remains only for the defensive case of a complete bar with no `open`. Native confirmation runs should backfill native 1-minute candles so their fallback count is ~0.
+4. **Fill**: if `target != position`, fill the delta at `fill_price = minute_close_at(bars[t+1].open_ts + LATENCY_S)` (the close of the 1-minute candle containing that instant, same source). **Amendment 2026-09-11 (Task 5 finding):** Hyperliquid retains only ~5,000 candles per interval, so 1-minute candles exist for ~3.5 days only; refusing every other fill would make proxy screening impossible. When no minute candle exists at that instant the fill uses the next bar's hourly `open` instead, is tagged `fill_source="hourly_open"`, and is counted in `fills_at_hourly_open`; the validation-log record carries that count so a reader sees how much of a result rests on the fallback. 2 s of drift is far below the pre-registered half-spread + 5 bps impact already charged. `fill_unavailable` remains only for the defensive case of a complete bar with no `open`. Native confirmation runs should backfill native 1-minute candles so their fallback count is ~0. **Amendment 2026-10-03 (§8.4):** before the hourly open, use the close of the most recent 1-minute candle at or before the fill minute if it is ≤ 60 min old (`fill_source="last_trade"`, counted in `fills_at_last_trade`, oldest in `max_last_trade_age_min`).
 5. **Costs**: `fill_cost(abs(delta) × NOTIONAL, bars[t].spread_bps, taker_fee_rate, IMPACT_BPS)`.
 6. **Mark**: equity at bar `t+1` close = cash + position × NOTIONAL × (close / entry − 1) for the open leg.
 
@@ -144,7 +144,8 @@ BAR = SufficiencyBar(
     min_funding_periods=1000,
     holdout_fraction=Decimal("0.30"),
     min_oos_sharpe=Decimal("1.0"),    # after modelled costs
-    bootstrap_ci=Decimal("0.95"),     # CI on mean net return must exclude zero
+    bootstrap_ci=Decimal("0.80"),    # ONE-SIDED lower bound on mean net return must be > 0 (§8.4)
+    last_trade_max_age_min=60,
     # pre-registered execution assumptions
     latency_s=2,
     impact_bps=Decimal("5"),
@@ -168,10 +169,12 @@ dataset {start, end, bars, complete_bars, funding_periods, days,
          tested_start, tested_end, tested_days, holdout_bars},   # tested_* = span actually backtested after trimming (added 2026-09-12)
 fee_used, latency_s, impact_bps, seed,
 train {sharpe, max_dd, hit_rate, turnover, n},
-holdout {sharpe, max_dd, hit_rate, turnover, n, ci_lo, ci_hi, fills, fills_unavailable, fills_at_hourly_open, bars_constant_spread},
+holdout {sharpe, max_dd, hit_rate, turnover, n, ci_lo, ci_hi, fills, fills_unavailable, fills_at_hourly_open, fills_at_last_trade, max_last_trade_age_min, bars_constant_spread},
+holdout_robust {same keys as holdout},     # added 2026-10-03 (8.4)
 sufficiency {met, shortfall},
 screened: bool,   # holdout cleared the stats thresholds, any source
-passed: bool      # screened AND source is native AND sufficiency.met AND holdout.fills_at_hourly_open == 0 AND tested_days >= min_days (see 8.3)
+robust_screened: bool,   # same thresholds on holdout_robust (8.4)
+passed: bool      # screened AND source is native AND sufficiency.met AND holdout.fills_at_hourly_open == 0 AND tested_days >= min_days AND robust_screened (see 8.3, 8.4)
 ```
 `passed` can only be `True` for `POLYMARKET_*` sources with `sufficiency.met`. Negative and insufficient results are appended too — nothing is discarded. `validation_log.read_passing() -> list[record]`.
 
@@ -182,6 +185,7 @@ passed: bool      # screened AND source is native AND sufficiency.met AND holdou
   {"run_id": "<run_id from validation_log.jsonl>", "approved_by": "<git user.name>", "approved_at": "<ISO-8601 UTC>", "note": "<why>"}
   ```
   It is `True` only if the file exists, names a `run_id` whose log record has `passed == True`, and `approved_by`/`approved_at` are non-empty. Any other state (missing file, empty object, unknown run_id, record not passed, proxy record, no approver) → `False`.
+  §8.4 adds `robust_screened is True` and revocation by a later failing native record.
 - Two keys therefore: a passing native record written by code, and a deliberate human commit of `validated.json`. Neither alone flips the flag. This satisfies the parent spec's "code-enforced, not discipline-only" and its "manual, never self-adjusting" boundary simultaneously.
 - `generate_signal` remains `NotImplementedError`. Selecting which validated strategy to run live is a Phase 2 decision.
 - `gates.live_orders_allowed` is unchanged; it already reads `SIGNAL_VALIDATED` at call time.
@@ -189,11 +193,36 @@ passed: bool      # screened AND source is native AND sufficiency.met AND holdou
 ### 8.3 Amendment 2026-09-12 (pre-registered before any native result)
 `passed` additionally requires zero hourly-open fallback fills on the holdout and a tested span ≥ `min_days`; the gate re-checks these from the record. Concretely: `evaluate_run` takes `holdout_fills_at_hourly_open` and `tested_days` and returns `passed = screened AND native AND sufficiency.met AND holdout_fills_at_hourly_open == 0 AND tested_days >= BAR.min_days` (`screened` is unchanged); `load_validated` accepts a record only if, besides `passed is True`, its `source_type` is native, `sufficiency.met is True` and `holdout.fills_at_hourly_open` is the integer `0` — any missing key is a `False`. Rationale: a native confirmation whose holdout fills were priced off the hourly open (no 1-minute candle) rests on an untested execution assumption, and `check_dataset` measures the span *stored*, not the span *backtested* after trimming incomplete edges. No native result existed when this was written (earliest possible native pass ≈ 2026-10-11).
 
+### 8.4 Amendment 2026-10-03 (pre-registered before any native result)
+Full reasoning: `docs/superpowers/specs/2026-10-03-bar-amendments-draft.md`. Implemented as `HARNESS_VERSION = 3`.
+
+**A. Confidence interval.** The CI check is a one-sided lower bound: the 20th percentile of the block-bootstrap distribution of the holdout mean net return must be > 0 (`BAR.bootstrap_ci = 0.80`; `scripts/run_backtest.py` computes the interval at the two-sided 0.60 level so `ci_lo`/`ci_hi` are the 20th/80th percentiles). `min_oos_sharpe = 1.0` stays. The old 95 % two-sided rule is a t-test needing annualised Sharpe >= 1.96 x sqrt(365 / holdout_days), which closes the gate for months:
+
+| tested days | holdout days | Sharpe needed (95 % two-sided, old) | Sharpe needed (80 % one-sided, new) |
+|---|---|---|---|
+| 60 (min) | 18 | 8.8 | 3.8 |
+| 100 | 30 | 6.8 | 2.9 |
+| 200 | 60 | 4.8 | 2.1 |
+| 400 | 120 | 3.4 | 1.5 |
+
+A pass is provisional. The gate (`load_validated`) is `False` if any native record at the current `harness_version` for the same hypothesis (case-insensitive) and the same instrument (compared as strings) did not pass (`passed is not True`) and has a data-window `end` later than the approved record's. A record whose `end` is missing, unparseable or timezone-naive also revokes (fail closed), and an approved record whose own `end` is unplaceable is never accepted. `run_backtest.py` clamps `end` to the run time, and the gate rejects an approved record whose `end` is after its own `ts`, so a future `--end` cannot make revocation impossible. File order is irrelevant. `passed` and the gate also require `robust_screened is True`. Part B sizing starts from the smallest size the exchange allows until a pass survives a re-run at >= 100 tested days (decided in the Part B spec).
+
+The re-check is an operator step, not automatic: re-run `scripts/run_backtest.py --source native` monthly for each approved hypothesis and instrument, alongside `scripts/sufficiency.py`.
+
+**B. Fill price when the fill minute had no trade.** Polymarket emits no 1-minute candle for a minute without trades (HH:00 missing in 362 of 1,214 hours for instrument 6, 474 for instrument 7). Rules: (1) fill minute missing -> close of the most recent native 1-minute candle at or before the fill instant if at most `BAR.last_trade_max_age_min = 60` minutes old (`fill_source="last_trade"`, `fills_at_last_trade`, `max_last_trade_age_min`); (2) else the hourly open as before (`fills_at_hourly_open`); (3) robustness: the holdout is evaluated twice, the second time with `fill_fallback="hourly_open"` (no last-trade step), stored as `holdout_robust`, and `robust_screened` must also hold; (4) §8.3's `fills_at_hourly_open == 0` stays, applied to the primary run. Staleness of the last trade before HH:00 in the missing hours, measured 2026-10-03 (2026-08-12 .. 2026-10-03):
+
+| instrument | median | p90 | p99 | max | within 60 min | gap to hourly open (bps, p50 / p90 / p99) |
+|---|---|---|---|---|---|---|
+| 6 | 2 min | 8 min | 58 min | 62 min | 360 / 362 | 3.1 / 9.7 / 29.7 |
+| 7 | 3 min | 13 min | 43 min | 63 min | 472 / 474 | 5.9 / 19.5 / 72.3 |
+
+Skipped: pricing from the tick feed's mark at HH:00:02 (ticks are kept 3 days); add it to the planned hourly tick rollup.
+
 ## 9. Error handling
 
 - Ingest: transient HTTP errors retried (3×, honouring `Retry-After`); anything else aborts loudly. Rows are idempotent (`INSERT OR IGNORE`).
 - Bars: never fabricate — missing data yields `complete=False`, never interpolation.
-- Harness: fills at the 1-minute close after latency, falling back to the next hourly open (counted) when no minute candle exists; refuses to trade across gaps; clamps targets; raises on non-finite numbers.
+- Harness: fills at the 1-minute close after latency, falling back, when no minute candle exists, to the last 1-minute close if at most 60 min old (counted as `fills_at_last_trade`, §8.4) and only then to the next hourly open (counted); refuses to trade across gaps; clamps targets; raises on non-finite numbers.
 - Stats: bootstrap on `< 2 × block_len` returns raise `ValueError("insufficient for block bootstrap")` — a run on a tiny dataset fails visibly rather than reporting a CI.
 - Gate: any malformed `validated.json` → `SIGNAL_VALIDATED = False` and a logged warning; never an exception at import (importing the package must not crash the feed).
 
@@ -202,7 +231,7 @@ passed: bool      # screened AND source is native AND sufficiency.met AND holdou
 Synthetic, deterministic, no network:
 - **Point-in-time**: recording strategy proves `len(history) == t + 1` on every call; harness never passes a bar beyond `t`.
 - **Gap rule**: a series with an incomplete bar forces a flatten and blocks re-entry until the next complete bar.
-- **Fill fallback**: no minute candle at `open_ts + latency` → fill at the next bar's hourly open, `fills_at_hourly_open` incremented; a complete bar with no `open` → `fill_unavailable`, position unchanged.
+- **Fill fallback**: no minute candle at `open_ts + latency` → fill at the last 1-minute close if at most 60 min old (`fills_at_last_trade`, §8.4), else at the next bar's hourly open, `fills_at_hourly_open` incremented; a complete bar with no `open` → `fill_unavailable`, position unchanged.
 - **Costs**: hand-computed expected costs for a known delta/spread/fee.
 - **Funding sign**: long position with positive funding loses exactly `notional × rate`.
 - **H1 sanity**: a constructed series where funding spikes then decays must be profitable net of costs on H1 with the pre-registered grid; a constant-funding series must trade never.

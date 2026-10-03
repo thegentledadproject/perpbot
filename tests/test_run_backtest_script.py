@@ -93,6 +93,10 @@ def test_run_backtest_h1_native_appends_one_record(tmp_path, monkeypatch):
     assert holdout["bars_constant_spread"] == holdout["n"] + 1 + record["params_chosen"]["lookback"]
     assert holdout["fills_at_hourly_open"] == holdout["fills"]  # no 1m candles seeded
     assert holdout["ci_lo"] is not None and holdout["ci_hi"] is not None  # >=48 holdout returns
+    assert holdout["fills_at_last_trade"] == 0 and holdout["max_last_trade_age_min"] == 0  # no 1m candles
+    robust = record["holdout_robust"]
+    assert robust["fills"] == holdout["fills"] and robust["fills_at_last_trade"] == 0
+    assert isinstance(record["robust_screened"], bool)
 
 
 def test_run_backtest_no_fee_row_exits(tmp_path, monkeypatch):
@@ -148,3 +152,12 @@ def test_same_end_reproduces_holdout_and_dataset_and_trims_trailing_incomplete(t
     assert a["dataset"]["bars"] == a["dataset"]["complete_bars"] == 400
     assert a["dataset"]["tested_days"] == "16.67"  # 400 h / 24, quantised to 0.01
     assert a["dataset"]["holdout_bars"] == 120
+
+
+def test_future_end_is_clamped_to_run_time(tmp_path, monkeypatch):
+    db_path = tmp_path / "t.sqlite3"
+    log_path = tmp_path / "log.jsonl"
+    _seed_db(db_path, n_bars=400, with_fee=True)
+    _run(monkeypatch, db_path, log_path, "--end", "2030-01-01T00:00:00+00:00")
+    (record,) = read_records(path=log_path)
+    assert record["end"] == record["ts"]

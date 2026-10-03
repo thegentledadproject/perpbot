@@ -30,9 +30,10 @@ def _suff(met, st):
     return SufficiencyReport(met=met, days=Decimal("61"), funding_periods=1464, source_type=st, shortfall={})
 
 
-def _eval(st, *, met=True, sharpe=1.5, ci_lo=0.001, ci_hi=0.002, fallback_fills=0, tested_days=Decimal("61")):
+def _eval(st, *, met=True, sharpe=1.5, ci_lo=0.001, ci_hi=0.002, fallback_fills=0, tested_days=Decimal("61"),
+          robust=True):
     return evaluate_run(source_type=st, sufficiency=_suff(met, st), holdout_sharpe=sharpe, ci_lo=ci_lo, ci_hi=ci_hi,
-                        holdout_fills_at_hourly_open=fallback_fills, tested_days=tested_days)
+                        holdout_fills_at_hourly_open=fallback_fills, tested_days=tested_days, robust_screened=robust)
 
 
 def test_evaluate_run_proxy_can_screen_but_never_pass():
@@ -69,3 +70,9 @@ def test_evaluate_run_no_ci_can_neither_screen_nor_pass():
     assert _eval(st, sharpe=2.0, ci_lo=None, ci_hi=0.002) == (False, False)
     assert _eval(st, sharpe=2.0, ci_lo=0.001, ci_hi=None) == (False, False)
     assert _eval(st, sharpe=2.0, ci_lo=None, ci_hi=None) == (False, False)
+
+
+def test_evaluate_run_native_passes_only_if_the_robustness_run_also_screens():
+    st = SourceType.POLYMARKET_REST
+    assert _eval(st) == (True, True)
+    assert _eval(st, robust=False) == (True, False)   # screened stays primary-only
