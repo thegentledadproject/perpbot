@@ -185,6 +185,7 @@ passed: bool      # screened AND source is native AND sufficiency.met AND holdou
   {"run_id": "<run_id from validation_log.jsonl>", "approved_by": "<git user.name>", "approved_at": "<ISO-8601 UTC>", "note": "<why>"}
   ```
   It is `True` only if the file exists, names a `run_id` whose log record has `passed == True`, and `approved_by`/`approved_at` are non-empty. Any other state (missing file, empty object, unknown run_id, record not passed, proxy record, no approver) → `False`.
+  §8.4 adds `robust_screened is True` and revocation by a later failing native record.
 - Two keys therefore: a passing native record written by code, and a deliberate human commit of `validated.json`. Neither alone flips the flag. This satisfies the parent spec's "code-enforced, not discipline-only" and its "manual, never self-adjusting" boundary simultaneously.
 - `generate_signal` remains `NotImplementedError`. Selecting which validated strategy to run live is a Phase 2 decision.
 - `gates.live_orders_allowed` is unchanged; it already reads `SIGNAL_VALIDATED` at call time.
@@ -221,7 +222,7 @@ Skipped: pricing from the tick feed's mark at HH:00:02 (ticks are kept 3 days); 
 
 - Ingest: transient HTTP errors retried (3×, honouring `Retry-After`); anything else aborts loudly. Rows are idempotent (`INSERT OR IGNORE`).
 - Bars: never fabricate — missing data yields `complete=False`, never interpolation.
-- Harness: fills at the 1-minute close after latency, falling back to the next hourly open (counted) when no minute candle exists; refuses to trade across gaps; clamps targets; raises on non-finite numbers.
+- Harness: fills at the 1-minute close after latency, falling back, when no minute candle exists, to the last 1-minute close if at most 60 min old (counted as `fills_at_last_trade`, §8.4) and only then to the next hourly open (counted); refuses to trade across gaps; clamps targets; raises on non-finite numbers.
 - Stats: bootstrap on `< 2 × block_len` returns raise `ValueError("insufficient for block bootstrap")` — a run on a tiny dataset fails visibly rather than reporting a CI.
 - Gate: any malformed `validated.json` → `SIGNAL_VALIDATED = False` and a logged warning; never an exception at import (importing the package must not crash the feed).
 

@@ -70,7 +70,7 @@ SDK; bumping is a deliberate task that re-verifies `exchange/client.py`.
 Spec: `docs/superpowers/specs/2026-09-11-polyperps-phase1-design.md`. The
 sufficiency bar is pre-registered in `polyperps/signal/sufficiency.py` (Strict:
 native ≥60 days, ≥1,000 funding periods, 30 % holdout, OOS Sharpe ≥1.0 after
-costs, bootstrap 95 % CI excluding zero). Native data cannot meet it before
+costs, one-sided 80 % bootstrap lower bound on mean net return > 0, spec §8.4). Native data cannot meet it before
 ~2026-10-11 (60 days after the first stored native funding row, 2026-08-12;
 re-check with `scripts/sufficiency.py`).
 
@@ -90,6 +90,9 @@ names a `passed=True` native record **and** carries `approved_by`/`approved_at`
 Since the 2026-09-12 amendment (spec §8.3) `passed` also requires zero hourly-open
 fallback fills on the holdout and a backtested span of at least 60 days, and the
 gate re-checks those from the record rather than trusting the flag.
+Spec §8.4 adds two more conditions: the robustness run (every last-trade fill priced at the
+hourly open) must also screen, and a later failing native record for the same hypothesis and
+instrument revokes the approval.
 
 ### Re-run the screens under harness_version 3 (operator step)
 
