@@ -171,3 +171,35 @@ def test_failing_record_that_does_not_revoke(tmp_path):
         d.mkdir()
         log, val = _log(d, [PASSING, other])
         assert load_validated(validated_path=val, log_path=log) is True, other
+
+
+def test_approved_record_with_unusable_end_is_false(tmp_path):
+    for i, end in enumerate(("garbage", "", "2026-10-12T00:00:00")):
+        d = tmp_path / str(i)
+        d.mkdir()
+        log, val = _log(d, [{**PASSING, "end": end}])
+        assert load_validated(validated_path=val, log_path=log) is False, end
+
+
+def test_later_failure_with_unplaceable_end_revokes(tmp_path):
+    for i, end in enumerate(("garbage", "", "2026-11-12T00:00:00", None, 5)):
+        d = tmp_path / str(i)
+        d.mkdir()
+        log, val = _log(d, [PASSING, {**LATER_FAIL, "end": end}])
+        assert load_validated(validated_path=val, log_path=log) is False, end
+    d = tmp_path / "missing"
+    d.mkdir()
+    log, val = _log(d, [PASSING, {k: v for k, v in LATER_FAIL.items() if k != "end"}])
+    assert load_validated(validated_path=val, log_path=log) is False
+
+
+def test_later_failure_matches_by_value_and_file_order_is_irrelevant(tmp_path):
+    for i, fail in enumerate([{**LATER_FAIL, "instrument_id": "6"}, {**LATER_FAIL, "hypothesis": "H1"}]):
+        d = tmp_path / str(i)
+        d.mkdir()
+        log, val = _log(d, [PASSING, fail])
+        assert load_validated(validated_path=val, log_path=log) is False, fail
+    d = tmp_path / "rev"
+    d.mkdir()
+    log, val = _log(d, [LATER_FAIL, PASSING])
+    assert load_validated(validated_path=val, log_path=log) is False

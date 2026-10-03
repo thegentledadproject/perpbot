@@ -56,6 +56,8 @@ def _record_passes(record: dict, run_id: str) -> bool:
     if not (isinstance(record.get("end"), str) and isinstance(record.get("hypothesis"), str)
             and type(record.get("instrument_id")) is int):
         return False   # cannot be placed in time, so revocation could not be checked
+    if _aware(record["end"]) is None:
+        return False   # an unparseable or naive end could never be revoked
     holdout = record.get("holdout")
     if not isinstance(holdout, dict):
         return False
@@ -64,18 +66,26 @@ def _record_passes(record: dict, run_id: str) -> bool:
     return type(fallback_fills) is int and fallback_fills == 0
 
 
+def _aware(s: Any) -> datetime | None:
+    """Parsed tz-aware datetime, or None for anything missing, unparseable or naive."""
+    try:
+        dt = datetime.fromisoformat(s)
+    except (TypeError, ValueError):
+        return None
+    return dt if dt.tzinfo is not None else None
+
+
 def _revokes(later: dict, approved: dict) -> bool:
     """Amendment A (spec 8.4): a pass is provisional. A native record at the current harness for the
     same hypothesis and instrument, on a LATER data window, that did not pass, closes the gate."""
-    try:
-        newer = datetime.fromisoformat(later["end"]) > datetime.fromisoformat(approved["end"])
-    except (KeyError, TypeError, ValueError):
-        return False
-    return (newer and later.get("hypothesis") == approved["hypothesis"]
-            and later.get("instrument_id") == approved["instrument_id"]
+    if not (later.get("hypothesis") is not None and str(later["hypothesis"]).lower() == approved["hypothesis"].lower()
+            and str(later.get("instrument_id")) == str(approved["instrument_id"])
             and later.get("harness_version") == HARNESS_VERSION
             and later.get("source_type") in _NATIVE_VALUES
-            and later.get("passed") is not True)
+            and later.get("passed") is not True):
+        return False
+    end = _aware(later.get("end"))
+    return end is None or end > _aware(approved["end"])   # a failure we cannot place in time fails closed
 
 
 def load_validated(*, validated_path: Path = VALIDATED_PATH, log_path: Path = LOG_PATH) -> bool:

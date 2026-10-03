@@ -62,8 +62,9 @@ def _stats(res, *, bootstrap: bool, seed: int) -> dict:
     }
     if bootstrap:
         try:
+            # (lo, hi) = 20th/80th percentiles; lo is the one-sided 80 % bound (spec 8.4)
             lo, hi = block_bootstrap_ci(res.returns, block_len=BAR.block_len, resamples=BAR.resamples,
-                                        ci=two_sided_level(), seed=seed)  # (lo, hi) = 20th/80th percentiles; lo is the one-sided 80 % bound (spec 8.4)
+                                        ci=two_sided_level(), seed=seed)
             out["ci_lo"], out["ci_hi"] = lo, hi
         except ValueError as exc:
             out["ci_lo"], out["ci_hi"] = None, None
