@@ -81,6 +81,7 @@ re-check with `scripts/sufficiency.py`).
 | sufficiency re-check (monthly) | `scripts/sufficiency.py` |
 | screen a hypothesis | `scripts/run_backtest.py --hypothesis h1 --instrument 6 --source hyperliquid` |
 | confirm on native (after the bar is met) | `scripts/run_backtest.py --hypothesis h1 --instrument 6 --source native` |
+| native re-check (monthly, after a pass) | `scripts/run_backtest.py --hypothesis <h> --instrument <id> --source native`; a later failing record revokes validated.json (spec 8.4) |
 
 Every run appends to `polyperps/signal/validation_log.jsonl` (committed).
 `SIGNAL_VALIDATED` flips to `True` only when `polyperps/signal/validated.json`
@@ -90,7 +91,7 @@ Since the 2026-09-12 amendment (spec §8.3) `passed` also requires zero hourly-o
 fallback fills on the holdout and a backtested span of at least 60 days, and the
 gate re-checks those from the record rather than trusting the flag.
 
-### Re-run the screens under harness_version 2 (operator step)
+### Re-run the screens under harness_version 3 (operator step)
 
 The gate accepts only records from the current harness, so the h1/h3 screens must be re-run.
 Locally:
@@ -100,10 +101,11 @@ Locally:
 
 On the box (its sudo rejects `-E`, so pass the environment through systemd-run):
 
-    sudo systemd-run --wait --pipe -p User=polyperps -p EnvironmentFile=/etc/polyperps/env -p WorkingDirectory=/opt/polyperps /opt/polyperps/.venv/bin/python scripts/run_backtest.py --hypothesis h1 --instrument 6 --source hyperliquid --fee-category equity --log-path /var/lib/polyperps/screens-v2.jsonl
+    sudo systemd-run --wait --pipe -p User=polyperps -p EnvironmentFile=/etc/polyperps/env -p WorkingDirectory=/opt/polyperps /opt/polyperps/.venv/bin/python scripts/run_backtest.py --hypothesis h1 --instrument 6 --source hyperliquid --fee-category equity --log-path /var/lib/polyperps/screens-v3.jsonl
 
 and the same with `--hypothesis h3`; then copy the new lines of
-`/var/lib/polyperps/screens-v2.jsonl` into `polyperps/signal/validation_log.jsonl` and commit.
+`/var/lib/polyperps/screens-v3.jsonl` into `polyperps/signal/validation_log.jsonl` and commit.
+The box holds no Hyperliquid proxy bars, so proxy screens run on the PC.
 h3 reads stored ticks (`index_close`) and tick retention is 3 days, so an h3 screen longer than
 that trades nothing until a tick rollup exists.
 

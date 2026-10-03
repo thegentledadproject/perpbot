@@ -1,6 +1,6 @@
 # DRAFT: sufficiency-bar amendments A and B (not in effect)
 
-Date: 2026-10-03. Status: **draft for the user's approval.** Nothing in code changes until approved.
+Date: 2026-10-03. Status: **APPROVED 2026-10-03, implemented as harness_version 3** (spec §8.4). The monthly re-check is an operator step (README), not part of scripts/sufficiency.py.
 Amends `docs/superpowers/specs/2026-09-11-polyperps-phase1-design.md` §5.2, §7, §8.1, §8.3 and
 `polyperps/signal/sufficiency.py::BAR`. Pre-registration: no native validation record exists yet
 (`validation_log.jsonl` holds proxy screens only), so both changes are still made before any native
