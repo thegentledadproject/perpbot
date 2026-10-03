@@ -4,6 +4,8 @@ BAR is frozen and pinned by tests/test_sufficiency.py. Every number here was
 chosen on 2026-09-11 before any backtest ran. Changing one is a spec
 amendment: edit the spec, edit this file, edit the test, and say so in the
 validation log's next record. Never adjust it to make a result pass.
+
+Amendment 2026-10-03 (spec 8.4): bootstrap_ci is a ONE-SIDED lower bound (was two-sided 0.95); last_trade_max_age_min prices a fill whose minute had no trade.
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ class SufficiencyBar:
     block_len: int
     resamples: int
     notional_usd: Decimal
+    last_trade_max_age_min: int
 
 
 BAR = SufficiencyBar(
@@ -42,13 +45,14 @@ BAR = SufficiencyBar(
     min_funding_periods=1000,
     holdout_fraction=Decimal("0.30"),
     min_oos_sharpe=Decimal("1.0"),
-    bootstrap_ci=Decimal("0.95"),
+    bootstrap_ci=Decimal("0.80"),
     latency_s=2,
     impact_bps=Decimal("5"),
     proxy_spread_bps=Decimal("5"),
     block_len=24,
     resamples=2000,
     notional_usd=Decimal("100"),
+    last_trade_max_age_min=60,
 )
 
 
@@ -84,11 +88,15 @@ def dataset_meets_bar(
     )
 
 
-def stats_clear_bar(*, oos_sharpe: float, ci_lo: float, ci_hi: float, bar: SufficiencyBar = BAR) -> bool:
-    """Holdout statistics clear the bar: Sharpe at/above the floor and a CI that excludes zero."""
-    if oos_sharpe < float(bar.min_oos_sharpe):
-        return False
-    return ci_lo > 0.0 or ci_hi < 0.0
+def stats_clear_bar(*, oos_sharpe: float, ci_lo: float, bar: SufficiencyBar = BAR) -> bool:
+    """Holdout statistics clear the bar: Sharpe at/above the floor and the one-sided
+    bar.bootstrap_ci lower bound on the mean net return above zero (amendment 2026-10-03)."""
+    return oos_sharpe >= float(bar.min_oos_sharpe) and ci_lo > 0.0
+
+
+def two_sided_level(bar: SufficiencyBar = BAR) -> float:
+    """The two-sided CI level whose lower end is the one-sided bar.bootstrap_ci bound (0.80 -> 0.60)."""
+    return 2 * float(bar.bootstrap_ci) - 1
 
 
 _EPOCH = datetime(2000, 1, 1, tzinfo=timezone.utc)

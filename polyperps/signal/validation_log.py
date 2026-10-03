@@ -67,7 +67,7 @@ def evaluate_run(
         # A run without a CI (too few holdout returns for the block bootstrap) can
         # neither screen nor pass -- there is nothing to judge significance against.
         return False, False
-    screened = stats_clear_bar(oos_sharpe=holdout_sharpe, ci_lo=ci_lo, ci_hi=ci_hi, bar=bar)
+    screened = stats_clear_bar(oos_sharpe=holdout_sharpe, ci_lo=ci_lo, bar=bar)
     passed = (
         screened
         and source_type in NATIVE_SOURCES

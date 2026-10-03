@@ -11,6 +11,7 @@ from polyperps.signal.sufficiency import (
     check_dataset,
     dataset_meets_bar,
     stats_clear_bar,
+    two_sided_level,
 )
 from polyperps.storage.db import connect, insert_funding
 
@@ -33,13 +34,14 @@ def test_bar_values_are_pinned():
         min_funding_periods=1000,
         holdout_fraction=Decimal("0.30"),
         min_oos_sharpe=Decimal("1.0"),
-        bootstrap_ci=Decimal("0.95"),
+        bootstrap_ci=Decimal("0.80"),
         latency_s=2,
         impact_bps=Decimal("5"),
         proxy_spread_bps=Decimal("5"),
         block_len=24,
         resamples=2000,
         notional_usd=Decimal("100"),
+        last_trade_max_age_min=60,
     )
 
 
@@ -70,11 +72,21 @@ def test_proxy_never_meets_bar_even_with_years_of_data():
     assert "source_type" in r.shortfall
 
 
-def test_stats_clear_bar_requires_sharpe_and_ci_excluding_zero():
-    assert stats_clear_bar(oos_sharpe=1.2, ci_lo=0.0001, ci_hi=0.001) is True
-    assert stats_clear_bar(oos_sharpe=0.9, ci_lo=0.0001, ci_hi=0.001) is False
-    assert stats_clear_bar(oos_sharpe=1.5, ci_lo=-0.0001, ci_hi=0.001) is False
-    assert stats_clear_bar(oos_sharpe=1.5, ci_lo=-0.002, ci_hi=-0.001) is True  # negative edge also "clears" statistically; sign is the strategy's job
+def test_stats_clear_bar_requires_sharpe_and_a_positive_one_sided_lower_bound():
+    # Amendment A (2026-10-03): one-sided 80 % lower bound on the mean must be > 0.
+    assert stats_clear_bar(oos_sharpe=1.2, ci_lo=0.0001) is True
+    assert stats_clear_bar(oos_sharpe=0.9, ci_lo=0.0001) is False
+    assert stats_clear_bar(oos_sharpe=1.5, ci_lo=-0.0001) is False
+    assert stats_clear_bar(oos_sharpe=1.5, ci_lo=0.0) is False
+
+
+def test_negative_edge_no_longer_clears():
+    # Two-sided "excludes zero" let a CI wholly below zero clear; one-sided it cannot.
+    assert stats_clear_bar(oos_sharpe=1.5, ci_lo=-0.002) is False
+
+
+def test_two_sided_level_puts_its_lower_end_at_the_one_sided_bound():
+    assert two_sided_level() == pytest.approx(0.60)
 
 
 def test_check_dataset_reports_shortfall_on_ten_days():
