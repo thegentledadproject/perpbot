@@ -425,3 +425,9 @@ def test_shadow_run_once_refuses_a_foreign_run_id_before_loading_the_wallet(monk
     with pytest.raises(SystemExit) as e:
         asyncio.run(mod.run_once(args, mod.load_settings()))
     assert e.value.code == 2
+
+
+def test_run_once_refuses_h4_without_a_live_proxy_feed():
+    mod = load()
+    with pytest.raises(SystemExit, match="h4 needs a live proxy feed; not wired"):
+        asyncio.run(mod.run_once(SimpleNamespace(hypothesis="h4"), None))

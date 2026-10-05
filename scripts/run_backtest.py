@@ -107,9 +107,9 @@ def main() -> None:
         minute_closes = load_minute_closes(conn, args.instrument, source, start=bars[0].open_ts, end=end)
 
         proxy_closes = None
-        if args.hypothesis == "h2":
+        if args.hypothesis in ("h2", "h4"):
             if source is not SourceType.POLYMARKET_REST:
-                raise SystemExit("h2 trades the native leg: use --source native")
+                raise SystemExit(f"{args.hypothesis} trades the native leg: use --source native")
             proxy_bars = build_bars(conn, args.instrument, SourceType.PROXY_HYPERLIQUID,
                                     start=bars[0].open_ts, end=end)
             proxy_closes = {b.open_ts: b.close for b in proxy_bars if b.complete and b.close is not None}

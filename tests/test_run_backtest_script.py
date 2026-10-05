@@ -161,3 +161,72 @@ def test_future_end_is_clamped_to_run_time(tmp_path, monkeypatch):
     _run(monkeypatch, db_path, log_path, "--end", "2030-01-01T00:00:00+00:00")
     (record,) = read_records(path=log_path)
     assert record["end"] == record["ts"]
+
+
+PROXY = SourceType.PROXY_HYPERLIQUID
+
+
+def _seed_proxy(db_path: Path, *, n_bars: int, last_open: datetime) -> None:
+    conn = connect(db_path)
+    try:
+        first_open = last_open - (n_bars - 1) * HOUR
+        for i in range(n_bars):
+            open_ts = first_open + i * HOUR
+            insert_candle(conn, Candle(instrument_id=6, interval="1h", open_ts=open_ts,
+                                       open=Decimal("100"), high=Decimal("100"), low=Decimal("100"),
+                                       close=Decimal("100"), volume=Decimal("1"), trades=1,
+                                       received_ts=open_ts, source_type=PROXY))
+            insert_funding(conn, FundingObservation(instrument_id=6, funding_rate=Decimal("0.0001"),
+                                                    exchange_ts=open_ts + HOUR, received_ts=open_ts + HOUR,
+                                                    source_type=PROXY))
+    finally:
+        conn.close()
+
+
+def _run_hyp(monkeypatch, db_path, log_path, hypothesis, source):
+    monkeypatch.setenv("POLYPERPS_DB_PATH", str(db_path))
+    monkeypatch.setenv("POLYPERPS_INSTRUMENT_IDS", "6")
+    monkeypatch.setattr(sys, "argv", [
+        "run_backtest.py", "--hypothesis", hypothesis, "--instrument", "6", "--source", source,
+        "--fee-category", "equity", "--log-path", str(log_path),
+    ])
+    _load_script().main()
+
+
+def _anchor():
+    return datetime.now(UTC).replace(minute=0, second=0, microsecond=0) - 3 * HOUR
+
+
+def test_h4_refuses_proxy_source(tmp_path, monkeypatch):
+    db_path = tmp_path / "t.sqlite3"
+    last = _anchor()
+    _seed_db(db_path, n_bars=0, with_fee=True)
+    _seed_proxy(db_path, n_bars=400, last_open=last)
+    with pytest.raises(SystemExit) as exc_info:
+        _run_hyp(monkeypatch, db_path, tmp_path / "log.jsonl", "h4", "hyperliquid")
+    assert "h4 trades the native leg: use --source native" in str(exc_info.value)
+
+
+def test_h4_native_run_appends_a_record_with_the_h4_grid(tmp_path, monkeypatch):
+    db_path, log_path = tmp_path / "t.sqlite3", tmp_path / "log.jsonl"
+    last = _anchor()
+    _seed_db(db_path, n_bars=400, with_fee=True, last_open=last)
+    _seed_proxy(db_path, n_bars=400, last_open=last)
+    _run_hyp(monkeypatch, db_path, log_path, "h4", "native")
+    (record,) = read_records(path=log_path)
+    assert record["hypothesis"] == "h4"
+    assert record["grid_tried"] == [
+        {"gap_bps": "25", "hold_bars": 1}, {"gap_bps": "25", "hold_bars": 3},
+        {"gap_bps": "50", "hold_bars": 1}, {"gap_bps": "50", "hold_bars": 3},
+    ]
+
+
+def test_h5_proxy_screen_appends_a_record(tmp_path, monkeypatch):
+    db_path, log_path = tmp_path / "t.sqlite3", tmp_path / "log.jsonl"
+    _seed_db(db_path, n_bars=0, with_fee=True)
+    _seed_proxy(db_path, n_bars=400, last_open=_anchor())
+    _run_hyp(monkeypatch, db_path, log_path, "h5", "hyperliquid")
+    (record,) = read_records(path=log_path)
+    assert record["hypothesis"] == "h5"
+    assert record["source_type"] == "proxy_hyperliquid"
+    assert record["passed"] is False   # the bar is native-only
