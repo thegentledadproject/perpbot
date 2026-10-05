@@ -221,6 +221,16 @@ def test_h4_native_run_appends_a_record_with_the_h4_grid(tmp_path, monkeypatch):
     ]
 
 
+def test_h4_refuses_low_proxy_coverage_and_writes_no_record(tmp_path, monkeypatch):
+    db_path, log_path = tmp_path / "t.sqlite3", tmp_path / "log.jsonl"
+    last = _anchor()
+    _seed_db(db_path, n_bars=400, with_fee=True, last_open=last)
+    _seed_proxy(db_path, n_bars=100, last_open=last)
+    with pytest.raises(SystemExit, match="proxy covers only"):
+        _run_hyp(monkeypatch, db_path, log_path, "h4", "native")
+    assert not log_path.exists() or log_path.read_text() == ""
+
+
 def test_h5_proxy_screen_appends_a_record(tmp_path, monkeypatch):
     db_path, log_path = tmp_path / "t.sqlite3", tmp_path / "log.jsonl"
     _seed_db(db_path, n_bars=0, with_fee=True)

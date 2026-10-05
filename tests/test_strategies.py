@@ -261,6 +261,11 @@ def test_h4_no_entry_when_polymarket_already_matched_or_overshot():
     assert h4(proxy=proxy).target([bar(0, "100"), bar(1, "100.6")]) == 0   # PM moved further: lag opposite
 
 
+def test_h4_sign_check_rejects_a_lag_opposite_to_the_leader():
+    # HL +50 bps, PM +100 bps: lag -50 bps. |lag| and |r_hl| both clear the gap, only the sign check rejects.
+    assert h4(proxy=hl((0, "100"), (1, "100.5"))).target([bar(0, "100"), bar(1, "101")]) == 0
+
+
 def test_h4_no_entry_when_leader_moved_less_than_gap():
     # HL +20 bps, PM -10 bps: lag 30 bps >= 25 but the leader itself moved < 25 bps
     s = h4(proxy=hl((0, "100"), (1, "100.2")))
@@ -429,3 +434,9 @@ def test_h5_on_flatten_and_on_recover():
     r.on_recover(1)
     assert r.target(bars[:2]) == Decimal(1)      # held 1 of 2
     assert r.target(bars[:3]) == 0               # held 2 -> flat
+
+
+def test_h5_ignores_a_valid_spike_when_the_current_close_is_missing():
+    bars = path(calm(170) + [0.01])   # spike is the last return, at hour 171
+    assert h5().target(bars) == Decimal(-1)   # sanity: it would fire on its own
+    assert h5().target(bars + [nbar(172, None)]) == 0

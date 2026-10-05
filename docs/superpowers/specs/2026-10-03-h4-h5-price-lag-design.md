@@ -120,6 +120,8 @@ results.
 | H4 `gap_bps` 25 / 50 | 32 / 19 | 33 / 21 |
 | H5 `entry_z` 2.5 / 3.5 (with the 30 bps floor, window excluding the current return) | 27 / 11 | 24 / 13 |
 
+The H5 counts were computed with the window excluding the current return, while the binding rule (§2.2) includes it, which lowers z slightly (e.g. 3.5 becomes about 3.36 at n = 168), so the 3.5 grid point will fire somewhat less often than counted; the rule stands as written.
+
 The holdout is the last 30 % (about 15 days), so expect roughly 3–10 holdout trades per run. Some H4 gaps may
 come from a stale Polymarket close: the last trade in a quiet hour can be minutes old. The fill rules (§8.4
 B: last-trade fill at most 60 min old, plus the hourly-open robustness run) price that in.
