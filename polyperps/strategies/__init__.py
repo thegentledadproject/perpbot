@@ -13,6 +13,7 @@ from polyperps.backtest.strategy import Strategy
 from polyperps.strategies.basis import Basis
 from polyperps.strategies.funding_reversion import FundingReversion
 from polyperps.strategies.index_lag import IndexLag
+from polyperps.strategies.lead_lag import LeadLag
 
 GRIDS: dict[str, list[dict]] = {
     "h1": [
@@ -28,6 +29,11 @@ GRIDS: dict[str, list[dict]] = {
     "h3": [
         {"entry_bps": eb, "hold_bars": hb}
         for eb in (Decimal("10"), Decimal("25"))
+        for hb in (1, 3)
+    ],
+    "h4": [
+        {"gap_bps": gb, "hold_bars": hb}
+        for gb in (Decimal("25"), Decimal("50"))
         for hb in (1, 3)
     ],
 }
@@ -47,4 +53,8 @@ def build_strategy(
         return Basis(**params, proxy_close_by_hour=proxy_close_by_hour)
     if hypothesis == "h3":
         return IndexLag(**params)
+    if hypothesis == "h4":
+        if proxy_close_by_hour is None:
+            raise ValueError("h4 needs proxy_close_by_hour")
+        return LeadLag(**params, proxy_close_by_hour=proxy_close_by_hour)
     raise ValueError(f"unknown hypothesis {hypothesis!r}")

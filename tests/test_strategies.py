@@ -11,6 +11,7 @@ from polyperps.strategies._zscore import zscore
 from polyperps.strategies.basis import Basis
 from polyperps.strategies.funding_reversion import FundingReversion
 from polyperps.strategies.index_lag import IndexLag
+from polyperps.strategies.lead_lag import LeadLag
 
 UTC = timezone.utc
 T0 = datetime(2026, 9, 11, 0, 0, tzinfo=UTC)
@@ -49,6 +50,10 @@ def test_grids_are_pre_registered():
     assert GRIDS["h3"] == [
         {"entry_bps": Decimal("10"), "hold_bars": 1}, {"entry_bps": Decimal("10"), "hold_bars": 3},
         {"entry_bps": Decimal("25"), "hold_bars": 1}, {"entry_bps": Decimal("25"), "hold_bars": 3},
+    ]
+    assert GRIDS["h4"] == [
+        {"gap_bps": Decimal("25"), "hold_bars": 1}, {"gap_bps": Decimal("25"), "hold_bars": 3},
+        {"gap_bps": Decimal("50"), "hold_bars": 1}, {"gap_bps": Decimal("50"), "hold_bars": 3},
     ]
 
 
@@ -182,6 +187,9 @@ def test_build_strategy():
     assert build_strategy("h1", GRIDS["h1"][0]).name == "h1_funding_reversion"
     assert build_strategy("h3", GRIDS["h3"][0]).name == "h3_index_lag"
     assert build_strategy("h2", GRIDS["h2"][0], proxy_close_by_hour={}).name == "h2_basis"
+    assert build_strategy("h4", GRIDS["h4"][0], proxy_close_by_hour={}).name == "h4_lead_lag"
+    with pytest.raises(ValueError, match="h4 needs proxy_close_by_hour"):
+        build_strategy("h4", GRIDS["h4"][0])
     with pytest.raises(ValueError):
         build_strategy("h2", GRIDS["h2"][0])
     with pytest.raises(ValueError):
@@ -212,3 +220,116 @@ def test_h3_on_recover_restores_position_through_a_neutral_bar():
     s = IndexLag(entry_bps=Decimal("10"), hold_bars=3)
     s.on_recover(1)
     assert s.target([bar(0, index="100")]) == Decimal(1)   # held 1 of 3 bars
+
+
+# --- H4: Lead-Lag ---
+
+
+def nbar(i, close):
+    """Native bar at T0 + i h whose close may be None (bar() always sets a close)."""
+    ts = T0 + i * H
+    c = Decimal(close) if close is not None else None
+    return Bar(instrument_id=6, source_type=SourceType.POLYMARKET_REST, open_ts=ts, open=c, high=c, low=c,
+               close=c, index_close=None, funding_rate=Decimal("0"), spread_bps=Decimal("5"),
+               spread_source="constant", complete=True)
+
+
+def h4(gap="25", hold=1, proxy=None):
+    return LeadLag(gap_bps=Decimal(gap), hold_bars=hold, proxy_close_by_hour=proxy or {})
+
+
+def hl(*pairs):
+    return {T0 + i * H: Decimal(v) for i, v in pairs}
+
+
+def test_h4_follows_the_leader_up_and_down():
+    bars = [bar(0, "100"), bar(1, "100")]
+    assert h4(proxy=hl((0, "100"), (1, "100.5"))).target(bars) == Decimal(1)    # HL +50 bps, PM flat
+    assert h4(proxy=hl((0, "100"), (1, "99.5"))).target(bars) == Decimal(-1)    # HL -50 bps, PM flat
+    assert h4().warmup == 2
+
+
+def test_h4_no_entry_when_polymarket_already_matched_or_overshot():
+    proxy = hl((0, "100"), (1, "100.5"))
+    assert h4(proxy=proxy).target([bar(0, "100"), bar(1, "100.5")]) == 0   # PM moved as much: lag 0
+    assert h4(proxy=proxy).target([bar(0, "100"), bar(1, "100.6")]) == 0   # PM moved further: lag opposite
+
+
+def test_h4_no_entry_when_leader_moved_less_than_gap():
+    # HL +20 bps, PM -10 bps: lag 30 bps >= 25 but the leader itself moved < 25 bps
+    s = h4(proxy=hl((0, "100"), (1, "100.2")))
+    assert s.target([bar(0, "100"), bar(1, "99.9")]) == 0
+
+
+def test_h4_no_entry_on_missing_or_zero_data_or_non_adjacent_bars():
+    proxy = hl((0, "100"), (1, "100.5"), (2, "100.5"))
+    assert h4(proxy=hl((1, "100.5"))).target([bar(0, "100"), bar(1, "100")]) == 0        # no proxy at p
+    assert h4(proxy=hl((0, "100"))).target([bar(0, "100"), bar(1, "100")]) == 0          # no proxy at c
+    assert h4(proxy=hl((0, "0"), (1, "100.5"))).target([bar(0, "100"), bar(1, "100")]) == 0  # zero proxy
+    assert h4(proxy=proxy).target([nbar(0, None), bar(1, "100")]) == 0                   # no native close at p
+    assert h4(proxy=proxy).target([bar(0, "100"), nbar(1, None)]) == 0                   # no native close at c
+    assert h4(proxy=proxy).target([bar(0, "100"), bar(2, "100")]) == 0                   # hour 1 missing
+    assert h4(proxy=proxy).target([bar(1, "100")]) == 0                                  # one bar only
+
+
+def test_h4_holds_exactly_hold_bars_and_does_not_reenter_on_the_exit_bar():
+    # every hour HL jumps +50 bps while PM stays flat, so every bar is a trigger
+    proxy = {T0 + i * H: Decimal(100) * Decimal("1.005") ** i for i in range(8)}
+    bars = [bar(i, "100") for i in range(8)]
+    s = h4(hold=3, proxy=proxy)
+    assert s.target(bars[:2]) == Decimal(1)      # entry
+    assert s.target(bars[:3]) == Decimal(1)      # held 1
+    assert s.target(bars[:4]) == Decimal(1)      # held 2
+    assert s.target(bars[:5]) == 0               # held 3 -> flat, trigger ignored on the exit bar
+    assert s.target(bars[:6]) == Decimal(1)      # fresh entry on the next bar
+
+
+def test_h4_keeps_counting_through_missing_data_while_open():
+    proxy = hl((0, "100"), (1, "100.5"))         # no proxy after hour 1
+    bars = [bar(0, "100"), bar(1, "100"), nbar(2, None), bar(3, "100")]
+    s = h4(hold=2, proxy=proxy)
+    assert s.target(bars[:2]) == Decimal(1)
+    assert s.target(bars[:3]) == Decimal(1)      # missing close: still held
+    assert s.target(bars[:4]) == 0               # exits on schedule
+
+
+class _StrictProxy(dict):
+    """Proxy closes that fail the test if the strategy reads an hour not yet in history."""
+
+    def __init__(self, data, allowed):
+        super().__init__(data)
+        self.allowed = allowed
+
+    def get(self, key, default=None):
+        assert key in self.allowed, f"look-ahead: read proxy hour {key} not in history"
+        return super().get(key, default)
+
+    def __getitem__(self, key):
+        assert key in self.allowed, f"look-ahead: read proxy hour {key} not in history"
+        return super().__getitem__(key)
+
+
+def test_h4_never_reads_a_proxy_hour_not_in_history():
+    bars = [bar(i, "100") for i in range(3)]
+    data = {T0 + i * H: Decimal(100) for i in range(6)}   # proxy has future hours 3..5
+    s = h4(proxy=_StrictProxy(data, allowed={b.open_ts for b in bars}))
+    for n in range(1, 4):
+        s.target(bars[:n])
+
+
+def test_h4_on_flatten_resets_position_and_hold_counter():
+    proxy = {T0 + i * H: Decimal(100) * Decimal("1.005") ** i for i in range(4)}
+    bars = [bar(i, "100") for i in range(4)]
+    s = h4(hold=3, proxy=proxy)
+    assert s.target(bars[:2]) == Decimal(1)
+    s.target(bars[:3])                            # held 1
+    s.on_flatten()
+    assert s.target(bars[:4]) == Decimal(1)      # fresh entry: the counter restarted
+    assert s._held == 0
+
+
+def test_h4_on_recover_holds_the_recovered_side_for_hold_bars():
+    s = h4(hold=2)
+    s.on_recover(-1)
+    assert s.target([bar(0, "100")]) == Decimal(-1)              # held 1 of 2
+    assert s.target([bar(0, "100"), bar(1, "100")]) == 0         # held 2 -> flat
