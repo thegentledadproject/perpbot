@@ -108,9 +108,23 @@ On the box (its sudo rejects `-E`, so pass the environment through systemd-run):
 
 and the same with `--hypothesis h3`; then copy the new lines of
 `/var/lib/polyperps/screens-v3.jsonl` into `polyperps/signal/validation_log.jsonl` and commit.
-The box holds no Hyperliquid proxy bars, so proxy screens run on the PC.
+The box now holds Hyperliquid proxy bars (400-day `backfill_hyperliquid.py` run 2026-10-03, daily 1m recorder since 2026-10-05), so proxy screens can run on the box.
 h3 reads stored ticks (`index_close`) and tick retention is 3 days, so an h3 screen longer than
 that trades nothing until a tick rollup exists.
+
+### H4 / H5 (pre-registered 2026-10-03)
+
+Spec: `docs/superpowers/specs/2026-10-03-h4-h5-price-lag-design.md`. H4 (lead-lag) is native-only
+and needs the Hyperliquid proxy bars in the same DB (refresh them first with
+`scripts/backfill_hyperliquid.py`); H4 refuses to run below 90 % proxy coverage of the native hours. H5 (overshoot) runs on either source; its Hyperliquid
+screen is informational only. Run both instruments with `--hypothesis h4` / `h5` alongside
+h1-h3 at the native run (earliest ~2026-10-12 14:00 UTC), e.g. on the box:
+
+    sudo systemd-run --wait --pipe -p User=polyperps -p EnvironmentFile=/etc/polyperps/env -p WorkingDirectory=/opt/polyperps /opt/polyperps/.venv/bin/python scripts/run_backtest.py --hypothesis h4 --instrument 6 --source native --fee-category equity
+
+Approval rule (operator, spec §3): add an H4 or H5 record to `validated.json` for one instrument
+only if the same hypothesis also has `passed = true` on the other instrument at the current
+harness_version. A failed H4/H5 is not re-tuned; a changed rule is a new hypothesis with its own spec.
 
 ## Phase 2a — paper execution (no live orders)
 

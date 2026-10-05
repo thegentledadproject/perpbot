@@ -43,6 +43,7 @@ from polyperps.strategies import GRIDS, build_strategy
 _SOURCES = {"native": SourceType.POLYMARKET_REST, "hyperliquid": SourceType.PROXY_HYPERLIQUID}
 _EPOCH = datetime(2000, 1, 1, tzinfo=timezone.utc)
 HOUR = timedelta(hours=1)
+_MIN_PROXY_COVERAGE = 0.90  # h2/h4 refuse to run if fewer native hours than this have a proxy close
 
 
 def _stats(res, *, bootstrap: bool, seed: int) -> dict:
@@ -107,12 +108,17 @@ def main() -> None:
         minute_closes = load_minute_closes(conn, args.instrument, source, start=bars[0].open_ts, end=end)
 
         proxy_closes = None
-        if args.hypothesis == "h2":
+        if args.hypothesis in ("h2", "h4"):
             if source is not SourceType.POLYMARKET_REST:
-                raise SystemExit("h2 trades the native leg: use --source native")
+                raise SystemExit(f"{args.hypothesis} trades the native leg: use --source native")
             proxy_bars = build_bars(conn, args.instrument, SourceType.PROXY_HYPERLIQUID,
                                     start=bars[0].open_ts, end=end)
             proxy_closes = {b.open_ts: b.close for b in proxy_bars if b.complete and b.close is not None}
+            native_hours = [b.open_ts for b in bars if b.complete]
+            pct = sum(t in proxy_closes for t in native_hours) / len(native_hours)
+            if pct < _MIN_PROXY_COVERAGE:
+                raise SystemExit(f"{args.hypothesis}: Hyperliquid proxy covers only {pct:.0%} of native hours "
+                                 "(need 90 %); run scripts/backfill_hyperliquid.py first")
 
         train, holdout = chronological_split(bars, holdout_fraction=BAR.holdout_fraction)
 

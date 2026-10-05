@@ -131,8 +131,10 @@ Grids are fixed lists, not ranges. Every grid point is a trial; selection is by 
 | H1 funding mean reversion | `strategies/funding_reversion.py` | `z = zscore(funding_rate, lookback)`; short when `z ≥ entry_z`, long when `z ≤ −entry_z`, flat when `abs(z) < exit_z` | `lookback ∈ {48, 168}`, `entry_z ∈ {1.5, 2.0}`, `exit_z = 0.5` |
 | H2 cross-venue basis | `strategies/basis.py` | `basis = pm_close / hl_close − 1` on `align_pair`; `z = zscore(basis, lookback)`; short PM when `z ≥ entry_z`, long when `z ≤ −entry_z`, flat inside `±0.5`; window = last `lookback` aligned pairs; gaps inside the window are skipped, not fatal | `lookback ∈ {24, 72}`, `entry_z ∈ {2.0, 3.0}` |
 | H3 mark-vs-index lag | `strategies/index_lag.py` | `premium_bps = (close / index_close − 1) × 1e4`; if `abs(premium_bps) ≥ entry_bps` take the position that closes the premium; hold `hold_bars` bars then flat; returns `0` when `index_close` is None (proxy) | `entry_bps ∈ {10, 25}`, `hold_bars ∈ {1, 3}` |
+| H4 lead-lag (added 2026-10-03) | `strategies/lead_lag.py` | follow a one-hour Hyperliquid move Polymarket has not matched; rules in `2026-10-03-h4-h5-price-lag-design.md` §2.1 | `gap_bps ∈ {25, 50}`, `hold_bars ∈ {1, 3}` |
+| H5 overshoot (added 2026-10-03) | `strategies/overshoot.py` | fade a one-hour Polymarket move with `abs(z) ≥ entry_z` over 168 returns and `abs(r) ≥ 30 bps`; rules in `2026-10-03-h4-h5-price-lag-design.md` §2.2 | `entry_z ∈ {2.5, 3.5}`, `hold_bars ∈ {3, 6}` |
 
-Warm-up = the strategy's `lookback` (H1/H2) or 1 (H3); bars inside warm-up are not traded.
+Warm-up = the strategy's `lookback` (H1/H2), 1 (H3), 2 (H4) or 169 (H5); bars inside warm-up are not traded.
 
 ## 7. Sufficiency bar (spec 1.0) — pre-registered, code-enforced
 

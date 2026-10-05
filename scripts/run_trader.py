@@ -170,8 +170,8 @@ async def run_until_first_exits(*coros) -> None:
 
 
 async def run_once(args, settings) -> None:
-    if args.hypothesis == "h2":
-        raise SystemExit("h2 needs a live proxy feed; not wired")
+    if args.hypothesis in ("h2", "h4"):
+        raise SystemExit(f"{args.hypothesis} needs a live proxy feed; not wired")
     settings.db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = db.connect(settings.db_path)
     run_id = args.run_id   # minted once in main(); systemd passes --run-id so every restart reopens the same account
