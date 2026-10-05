@@ -1,6 +1,6 @@
 # H4 lead-lag and H5 overshoot: pre-registered hypotheses
 
-Date: 2026-10-03. Status: **DRAFT, awaiting user review.** Amends
+Date: 2026-10-03. Status: **APPROVED 2026-10-05** (plan `docs/superpowers/plans/2026-10-05-h4-h5-price-lag.md`). Amends
 `docs/superpowers/specs/2026-09-11-polyperps-phase1-design.md` §6 (two new grid rows).
 
 **Pre-registration.** Before writing this spec, nobody had looked at a backtest, P&L or holdout result for
@@ -190,6 +190,6 @@ Added to `tests/test_strategies.py` and the script tests.
 ## 6. Out of scope
 
 - A live Hyperliquid feed for trading H2/H4.
-- Minute-level strategies. Hyperliquid 1m data recording is a separate ops step, waiting on user permission.
+- Minute-level strategies. Hyperliquid 1m data recording is a separate ops step (transient timer `polyperps-hl-1m`, running since 2026-10-05).
 - The fix for half-finished candles in `backfill_hyperliquid.py`, which is a separate bounded change.
 - Any change to the bar or the harness.
