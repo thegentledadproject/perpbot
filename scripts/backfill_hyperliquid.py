@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 
 from polyperps.config import load_settings
 from polyperps.data_ingest.hyperliquid import HyperliquidClient, TransientProxyError
+from polyperps.data_ingest.intervals import closed
 from polyperps.exchange.rate_limiter import TokenBucket
 from polyperps.storage import db
 
@@ -72,14 +73,14 @@ async def main() -> None:
                         lambda: client.funding_history(coin, start=w_start, end=w_end, instrument_id=iid), label
                     ):
                         n_f += db.insert_funding(conn, f)
-                    for c in await with_retries(
+                    for c in closed(await with_retries(
                         lambda: client.candles(coin, interval="1h", start=w_start, end=w_end, instrument_id=iid), label
-                    ):
+                    ), end):
                         n_h += db.insert_candle(conn, c)
                     if not args.no_minutes:
-                        for c in await with_retries(
+                        for c in closed(await with_retries(
                             lambda: client.candles(coin, interval="1m", start=w_start, end=w_end, instrument_id=iid), label
-                        ):
+                        ), end):
                             n_m += db.insert_candle(conn, c)
                 except TransientProxyError:
                     failed.append((w_start, w_end))
