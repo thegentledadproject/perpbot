@@ -8,7 +8,9 @@ skips the gap check entirely rather than guessing a fallback interval).
 from __future__ import annotations
 
 import re
-from datetime import timedelta
+from datetime import datetime, timedelta
+
+from polyperps.exchange.types import Candle
 
 _PATTERN = re.compile(r"^(\d+)([smhdw])$", re.IGNORECASE)
 
@@ -28,3 +30,9 @@ def parse_interval(text: str) -> timedelta | None:
     amount = int(match.group(1))
     unit = match.group(2).lower()
     return timedelta(**{_UNIT_TO_KWARG[unit]: amount})
+
+
+def closed(candles: list[Candle], now: datetime) -> list[Candle]:
+    """Only candles whose interval has ended. db.insert_candle is INSERT OR IGNORE, so a candle
+    stored while its interval is still open would stay half-built forever."""
+    return [c for c in candles if c.open_ts + parse_interval(c.interval) <= now]

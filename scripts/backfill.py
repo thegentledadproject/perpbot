@@ -28,9 +28,8 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 
 from polyperps.config import load_settings
-from polyperps.data_ingest.intervals import parse_interval
+from polyperps.data_ingest.intervals import closed, parse_interval
 from polyperps.exchange.client import TRANSIENT_ERRORS, PolymarketPerpsClient, retry_after_seconds
-from polyperps.exchange.types import Candle
 from polyperps.storage import db
 from polyperps.storage.gaps import find_gaps
 
@@ -41,12 +40,6 @@ _INTERVAL_CHOICES = ("1m", "5m", "15m", "1h", "4h", "1d")
 
 _MAX_ATTEMPTS = 3
 _RETRY_SLEEP_S = 60
-
-
-def closed(candles: list[Candle], now: datetime) -> list[Candle]:
-    """Only candles whose interval has ended. db.insert_candle is INSERT OR IGNORE, so a candle
-    stored while its interval is still open would stay half-built forever."""
-    return [c for c in candles if c.open_ts + parse_interval(c.interval) <= now]
 
 
 async def _fetch_window(
