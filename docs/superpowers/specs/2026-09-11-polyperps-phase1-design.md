@@ -223,9 +223,9 @@ Skipped: pricing from the tick feed's mark at HH:00:02 (ticks are kept 3 days); 
 ### 8.5 Amendment 2026-10-07
 Implemented as `HARNESS_VERSION = 4`.
 
-**Rule.** `strategies/_zscore.zscore` returns 0 for a flat window (stdev 0) instead of None; fewer than 3 values still returns None. h1 and h2 therefore exit a held position on a flat window (|0| < exit_z); h5 is unaffected (it reads z only when flat, and 0 never enters); h3/h4 do not use the z-score.
+**Rule.** `strategies/_zscore.zscore` returns 0 for a flat window (stdev 0) instead of None; fewer than 3 values still returns None. h1 and h2 therefore exit a held position on a flat window (inside the exit band: h1's `exit_z`, h2's fixed 0.5); h5 is unaffected (it reads z only when flat, and 0 never enters); h3/h4 do not use the z-score.
 
-**Why.** Found by watching the paper account, not from any backtest result. Paper run `paper-soak-1`: instrument 7 (ETH) funding took 7 distinct values in the 280 hours from 2026-09-26 and sat at 1.25e-05 for more than 48 h, so z was None every hour and a long opened 2026-09-28 04:00 UTC was still held at 2026-10-07 (145 consecutive `hold` decisions). A flat window means the last value equals the mean, which is the definition of not unusual.
+**Why.** Found by watching the paper account, not from any backtest result. Paper run `paper-soak-1`: instrument 7 (ETH) funding took 7 distinct values in the 280 hours from 2026-09-26 and sat at 1.25e-05 for more than 48 h, so z was None on every bar of the flat stretch and a long opened 2026-09-28 04:00 UTC was still held at 2026-10-07 (145 consecutive `hold` decisions). A flat window means the last value equals the mean, which is the definition of not unusual.
 
 **Pre-registration status.** No native record has passed; the only native record (h2, instrument 6, 2026-09-11) predates harness versioning and did not screen. The version bump retires all v3 records from the gate.
 
