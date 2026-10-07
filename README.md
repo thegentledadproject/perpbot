@@ -94,7 +94,7 @@ Spec §8.4 adds two more conditions: the robustness run (every last-trade fill p
 hourly open) must also screen, and a later failing native record for the same hypothesis and
 instrument revokes the approval.
 
-### Re-run the screens under harness_version 3 (operator step)
+### Re-run the screens under harness_version 4 (operator step)
 
 The gate accepts only records from the current harness, so the h1/h3 screens must be re-run.
 Locally:
@@ -104,10 +104,10 @@ Locally:
 
 On the box (its sudo rejects `-E`, so pass the environment through systemd-run):
 
-    sudo systemd-run --wait --pipe -p User=polyperps -p EnvironmentFile=/etc/polyperps/env -p WorkingDirectory=/opt/polyperps /opt/polyperps/.venv/bin/python scripts/run_backtest.py --hypothesis h1 --instrument 6 --source hyperliquid --fee-category equity --log-path /var/lib/polyperps/screens-v3.jsonl
+    sudo systemd-run --wait --pipe -p User=polyperps -p EnvironmentFile=/etc/polyperps/env -p WorkingDirectory=/opt/polyperps /opt/polyperps/.venv/bin/python scripts/run_backtest.py --hypothesis h1 --instrument 6 --source hyperliquid --fee-category equity --log-path /var/lib/polyperps/screens-v4.jsonl
 
 and the same with `--hypothesis h3`; then copy the new lines of
-`/var/lib/polyperps/screens-v3.jsonl` into `polyperps/signal/validation_log.jsonl` and commit.
+`/var/lib/polyperps/screens-v4.jsonl` into `polyperps/signal/validation_log.jsonl` and commit.
 The box now holds Hyperliquid proxy bars (400-day `backfill_hyperliquid.py` run 2026-10-03, daily 1m recorder since 2026-10-05), so proxy screens can run on the box.
 h3 reads stored ticks (`index_close`) and tick retention is 3 days, so an h3 screen longer than
 that trades nothing until a tick rollup exists.

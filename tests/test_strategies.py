@@ -31,10 +31,27 @@ def minutes(bars):
 
 
 def test_zscore():
-    assert zscore([Decimal(1)] * 5) is None
+    z0 = zscore([Decimal(1)] * 5)
+    assert z0 == 0 and isinstance(z0, Decimal)
+    z48 = zscore([Decimal("0.00001")] * 48)
+    assert z48 == 0 and isinstance(z48, Decimal)
     assert zscore([Decimal(1), Decimal(2)]) is None
     z = zscore([Decimal(0)] * 9 + [Decimal(3)])
     assert z > 2
+
+
+def test_h1_flat_funding_window_flattens_an_open_position():
+    s = FundingReversion(lookback=48, entry_z=Decimal("1.5"), exit_z=Decimal("0.5"))
+    s.on_recover(1)
+    flat = [bar(i, funding="0.0000125") for i in range(48)]
+    assert s.target(flat) == Decimal(0)
+
+
+def test_h2_flat_basis_window_flattens_an_open_position():
+    bars = [bar(i) for i in range(24)]
+    s = Basis(lookback=24, entry_z=Decimal("2.0"), proxy_close_by_hour={b.open_ts: Decimal(100) for b in bars})
+    s.on_recover(-1)
+    assert s.target(bars) == Decimal(0)
 
 
 def test_grids_are_pre_registered():
@@ -154,7 +171,7 @@ def test_h1_on_flatten_resets_stale_position():
     s = FundingReversion(lookback=48, entry_z=Decimal("1.5"), exit_z=Decimal("0.5"))
     assert s.target(bars) == Decimal(-1)  # entered short on the funding spike
     s.on_flatten()
-    neutral = [bar(i, funding="0.0001") for i in range(48)]  # constant funding -> z is None -> returns _position
+    neutral = [bar(i, funding="0.0002" if i % 2 else "0.0001") for i in range(48)]  # in-band z ~ +0.99 -> holds _position
     assert s.target(neutral) == Decimal(0)  # without the reset this would still be -1
 
 
@@ -164,7 +181,7 @@ def test_h2_on_flatten_resets_stale_position():
     s = Basis(lookback=24, entry_z=Decimal("2.0"), proxy_close_by_hour=hl)
     assert s.target(bars) == Decimal(-1)  # entered short on the rich basis
     s.on_flatten()
-    neutral = [bar(i) for i in range(24)]  # flat basis throughout -> z is None -> returns _position
+    neutral = [bar(i, close="101" if i % 2 else "100") for i in range(24)]  # in-band z ~ +0.98 -> holds _position
     assert s.target(neutral) == Decimal(0)  # without the reset this would still be -1
 
 
@@ -175,7 +192,7 @@ def test_h2_early_return_resets_state_on_missing_proxy_hour():
     assert s.target(bars) == Decimal(-1)  # entered short
     missing_hour = bars + [bar(26)]  # bar 26's open_ts is not in hl
     assert s.target(missing_hour) == Decimal(0)  # early return
-    neutral = [bar(i) for i in range(24)]
+    neutral = [bar(i, close="101" if i % 2 else "100") for i in range(24)]  # in-band z ~ +0.98 -> holds _position
     assert s.target(neutral) == Decimal(0)  # a following neutral call must not see the stale -1
 
 
@@ -205,21 +222,25 @@ def test_build_strategy():
 # --- final review I4: strategy position state survives a restart ---------------------------
 
 
-def test_h1_on_recover_restores_position_through_a_neutral_bar():
+def test_h1_on_recover_restores_position_through_an_in_band_bar():
     s = FundingReversion(lookback=48, entry_z=Decimal("1.5"), exit_z=Decimal("0.5"))
+    # alternating funding ending high: z ~ +1, between exit_z and entry_z -> hold what we had
+    inband = [bar(i, funding="0.0002" if i % 2 else "0.0001") for i in range(48)]
     s.on_recover(1)
-    assert s.target([bar(i, funding="0.0001") for i in range(48)]) == Decimal(1)   # flat funding: z None -> hold
+    assert s.target(inband) == Decimal(1)
     s.on_recover(-1)
-    assert s.target([bar(i, funding="0.0001") for i in range(48)]) == Decimal(-1)
+    assert s.target(inband) == Decimal(-1)
     s.on_recover(0)
-    assert s.target([bar(i, funding="0.0001") for i in range(48)]) == Decimal(0)
+    assert s.target(inband) == Decimal(0)
 
 
-def test_h2_on_recover_restores_position_through_a_neutral_bar():
-    bars = [bar(i) for i in range(3)]
+def test_h2_on_recover_restores_position_through_an_in_band_bar():
+    bars = [bar(0), bar(1, close="101"), bar(2)]   # basis 0, +1%, 0: z of last ~ -0.58, in band
     s = Basis(lookback=3, entry_z=Decimal("2.0"), proxy_close_by_hour={b.open_ts: Decimal(100) for b in bars})
     s.on_recover(1)
-    assert s.target(bars) == Decimal(1)                # basis 0 everywhere: z None -> hold what we had
+    assert s.target(bars) == Decimal(1)
+    s.on_recover(0)
+    assert s.target(bars) == Decimal(0)
 
 
 def test_h3_on_recover_restores_position_through_a_neutral_bar():

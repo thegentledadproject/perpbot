@@ -35,8 +35,8 @@ _Q = Decimal("0.00000001")
 
 # Bump on any change to the harness's trading rules or cost model. Validation records carry it and
 # the live gate (signal.base) accepts only records at the current version.
-# 1 = Phase 1 harness (flip in one fill, no guards); 2 = Part A router parity; 3 = amendments A+B (one-sided CI; last-trade fill fallback, spec 8.4).
-HARNESS_VERSION = 3
+# 1 = Phase 1 harness (flip in one fill, no guards); 2 = Part A router parity; 3 = amendments A+B (one-sided CI; last-trade fill fallback, spec 8.4); 4 = flat z-score window is 0, not None (spec 8.5).
+HARNESS_VERSION = 4
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
