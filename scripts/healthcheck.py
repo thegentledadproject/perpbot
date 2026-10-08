@@ -26,7 +26,7 @@ from polyperps.monitor.alerts import Alert, Alerter, default_sinks
 from polyperps.storage import db
 
 RUN_ID = "ops-health"   # not the paper run id: ops alerts must not change the soak's own counters
-UNITS = ("polyperps-feed.service", "polyperps-paper.service")
+UNITS = ("polyperps-feed.service", "polyperps-paper.service", "polyperps-paper@h3.service", "polyperps-paper@h5.service")
 ONESHOTS = ("polyperps-prune.service", "polyperps-backfill.service")
 log = logging.getLogger("polyperps.health")
 
