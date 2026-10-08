@@ -1,6 +1,7 @@
 """Stdlib HTTP server for the read-only dashboard.
 
-Two routes: "/" (the page) and "/api/state" (JSON). Each state request opens
+Two routes: "/" (the page) and "/api/state[?run=<id>]" (JSON; id must be the
+main run or one of its `<main>-hN` siblings). Each state request opens
 its own read-only SQLite connection, so this process can never write the
 trading DB and never shares a connection between threads.
 """
@@ -9,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import socket
+import re
 import sqlite3
 from datetime import datetime, timezone
 from http import HTTPStatus
@@ -16,8 +18,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
+from urllib.parse import parse_qs
 
-from polyperps.dashboard.state import InstrumentInfo, build_state
+from polyperps.dashboard.state import InstrumentInfo, build_state, list_runs
 
 log = logging.getLogger(__name__)
 
@@ -62,16 +65,27 @@ class DashboardServer:
         uri = "file:" + Path(db_path).resolve().as_posix() + "?mode=ro"
         return sqlite3.connect(uri, uri=True)
 
-    def state(self) -> dict:
+    def state(self, run_id: str | None = None) -> dict | None:
+        """None when `run_id` is not one of the runs this dashboard shows."""
         conn = self.open_readonly(self._db_path)
         try:
-            return build_state(
-                conn, run_id=self._run_id, instrument_ids=self._instrument_ids,
-                instruments=self._instruments(), hypothesis=self._hypothesis,
+            runs = list_runs(conn, main_run_id=self._run_id)
+            run_id = run_id or self._run_id
+            if run_id not in runs:
+                return None
+            state = build_state(
+                conn, run_id=run_id, instrument_ids=self._instrument_ids,
+                instruments=self._instruments(), hypothesis=self._hypothesis_of(run_id),
                 host=self._host, now=self._clock(),
             )
+            state["runs"] = [{"run_id": r, "hypothesis": self._hypothesis_of(r)} for r in runs]
+            return state
         finally:
             conn.close()
+
+    def _hypothesis_of(self, run_id: str) -> str:
+        m = re.fullmatch(re.escape(self._run_id) + r"-(h\d+)", run_id)
+        return m.group(1) if m else self._hypothesis
 
     def _handler_class(self):
         server = self
@@ -99,12 +113,16 @@ class DashboardServer:
                 self._send(status, json.dumps(payload).encode(), "application/json; charset=utf-8", head=head)
 
             def _route(self, *, head: bool) -> None:
-                path = self.path.split("?", 1)[0]
+                path, _, query = self.path.partition("?")
                 if path == "/":
                     self._send(HTTPStatus.OK, server._index, "text/html; charset=utf-8", head=head)
                 elif path == "/api/state":
                     try:
-                        payload = server.state()
+                        run = parse_qs(query).get("run", [None])[0]
+                        payload = server.state(run)
+                        if payload is None:
+                            self._json(HTTPStatus.NOT_FOUND, {"error": "unknown_run"}, head=head)
+                            return
                         body = json.dumps(payload).encode()
                     except sqlite3.OperationalError as e:
                         log.warning("dashboard: db unavailable: %s", e)

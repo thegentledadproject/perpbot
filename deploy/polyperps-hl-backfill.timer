@@ -1,0 +1,9 @@
+[Unit]
+Description=daily polyperps Hyperliquid proxy backfill at 00:20 UTC (--days 3 overlaps, so one missed day loses nothing)
+
+[Timer]
+OnCalendar=*-*-* 00:20:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

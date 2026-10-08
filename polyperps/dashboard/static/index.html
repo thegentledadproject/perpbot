@@ -62,6 +62,7 @@
   <div class="hdr">
     <div><div class="brand">polyperps</div><div class="sub" id="subtitle">paper soak</div></div>
     <div class="chips" id="chips"></div>
+    <div class="seg" id="runseg" title="paper run"></div>
     <div class="right">
       <div class="seg" id="instseg"></div>
       <div class="kv" id="feedlamp"><span><i class="lamp" style="background:var(--mute)"></i>feed —</span></div>
@@ -101,6 +102,7 @@
 (function () {
   'use strict';
   var S = null, inst = 'all', tab = 'decisions', selected = null, lastOk = null;
+  var run = null; try { run = localStorage.getItem('polyperps.run'); } catch (e) {}
   var GOOD = 'var(--good)', WARN = 'var(--warn)', SERIOUS = 'var(--serious)', CRIT = 'var(--crit)', MUTE = 'var(--mute)';
 
   function esc(x) { return String(x).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
@@ -123,6 +125,8 @@
       '<div class="chip">run <b>' + esc(r.run_id) + '</b></div><div class="chip">executor <b>SIM</b></div>' +
       '<div class="chip">hypothesis <b>' + esc(r.hypothesis) + '</b></div><div class="chip">box <b>' + esc(r.host) + '</b></div>' +
       '<div class="chip">up <b>' + (r.started_at ? dur(r.uptime_s) : '—') + '</b></div>';
+
+    document.getElementById('runseg').innerHTML = (S.runs || []).map(function (x) { return '<button data-run="' + esc(x.run_id) + '" class="' + (x.run_id === r.run_id ? 'on' : '') + '">' + esc(x.hypothesis) + '</button>'; }).join('');
 
     var seg = [{ k: 'all', l: 'All' }].concat(ids().map(function (id) { return { k: id, l: id + ' ' + name(id) }; }));
     document.getElementById('instseg').innerHTML = seg.map(function (t) { return '<button data-k="' + t.k + '" class="' + (String(t.k) === String(inst) ? 'on' : '') + '">' + esc(t.l) + '</button>'; }).join('');
@@ -216,6 +220,7 @@
   }
 
   document.addEventListener('click', function (ev) {
+    var rb = ev.target.closest('#runseg button'); if (rb) { run = rb.dataset.run; try { localStorage.setItem('polyperps.run', run); } catch (e) {} poll(); return; }
     var b = ev.target.closest('#instseg button'); if (b) { inst = b.dataset.k; render(); return; }
     var t = ev.target.closest('#tabs button'); if (t) { tab = t.dataset.t; render(); return; }
     var r = ev.target.closest('.row.body'); if (r) { var id = Number(r.dataset.id); selected = selected === id ? null : id; render(); }
@@ -228,10 +233,11 @@
   }
 
   function poll() {
-    fetch('/api/state', { cache: 'no-store' }).then(function (r) {
+    fetch('/api/state' + (run ? '?run=' + encodeURIComponent(run) : ''), { cache: 'no-store' }).then(function (r) {
+      if (r.status === 404 && run) { run = null; try { localStorage.removeItem('polyperps.run'); } catch (e) {} return poll(); }   // run from an old soak
       if (!r.ok) throw new Error(String(r.status));
       return r.json();
-    }).then(function (s) { S = s; lastOk = s.generated_at; stale(false); render(); })
+    }).then(function (s) { if (!s) return; S = s; lastOk = s.generated_at; stale(false); render(); })
       .catch(function () { stale(true); });
   }
   poll();

@@ -1,0 +1,20 @@
+[Unit]
+Description=polyperps daily Hyperliquid 1m/1h proxy backfill (h2/h4 history; Hyperliquid keeps only ~3.5 days of 1m)
+# A failed backfill is checked (and alerted) right away.
+OnFailure=polyperps-health.service
+
+[Service]
+Type=oneshot
+User=polyperps
+Group=polyperps
+WorkingDirectory=/opt/polyperps
+EnvironmentFile=/etc/polyperps/env
+ExecStart=/opt/polyperps/.venv/bin/python scripts/backfill_hyperliquid.py --days 3 --map 6=BTC,7=ETH
+TimeoutStartSec=30min
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/polyperps
+StandardOutput=journal
+StandardError=journal
