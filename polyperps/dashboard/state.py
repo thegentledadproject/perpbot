@@ -276,6 +276,13 @@ def _started_at(conn, run_id: str) -> datetime | None:
     return min(stamps) if stamps else None
 
 
+def list_runs(conn, *, main_run_id: str) -> list[str]:
+    """The main paper run plus its per-hypothesis siblings (`<main>-h3`, ...), main first."""
+    rows = conn.execute("SELECT run_id FROM account_snapshots").fetchall()
+    extra = sorted(r for (r,) in rows if r.startswith(main_run_id + "-"))
+    return [main_run_id] + extra
+
+
 def run_info(conn, *, run_id: str, hypothesis: str, host: str, now: datetime) -> dict:
     started = _started_at(conn, run_id)
     uptime = int((now - started).total_seconds()) if started else 0

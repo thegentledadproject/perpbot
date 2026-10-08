@@ -19,7 +19,8 @@ SHELL_FILES = ["bootstrap.sh", "update.sh"]
 # 5.1 does not require CRLF, and the repo standardizes on LF everywhere.
 LF_ONLY_FILES = UNIT_FILES + ["env.example"] + SHELL_FILES + ["deploy.ps1", "polyperps-health.service", "polyperps-health.timer",
                                                                               "polyperps-prune.service", "polyperps-prune.timer",
-                                                                              "polyperps-backfill.service", "polyperps-backfill.timer", "needrestart-polyperps.conf"]
+                                                                              "polyperps-backfill.service", "polyperps-backfill.timer", "polyperps-hl-backfill.service",
+                                                                              "polyperps-hl-backfill.timer", "needrestart-polyperps.conf"]
 
 LIVE_EXECUTOR_RE = re.compile(r"--executor\s+live")
 
@@ -163,3 +164,16 @@ def test_extra_paper_runs_are_wired():
     assert "Restart=always" in text
     for name in ("bootstrap.sh", "update.sh"):
         assert "polyperps-paper@h3 polyperps-paper@h5" in _read(name)
+
+
+def test_hyperliquid_backfill_timer_is_wired():
+    svc = _read("polyperps-hl-backfill.service")
+    assert "User=polyperps" in svc
+    assert "OnFailure=polyperps-health.service" in svc
+    assert "scripts/backfill_hyperliquid.py --days 3 --map 6=BTC,7=ETH" in svc
+    for script in EXEC_START_RE.findall(svc):
+        assert (REPO_ROOT / script).is_file()
+    timer = _read("polyperps-hl-backfill.timer")
+    assert "OnCalendar=*-*-* 00:20:00 UTC" in timer and "Persistent=true" in timer
+    for name in ("bootstrap.sh", "update.sh"):
+        assert "enable --now polyperps-hl-backfill.timer" in _read(name)

@@ -61,7 +61,8 @@ def test_state_is_json_with_top_level_keys(server):
     assert headers["Cache-Control"] == "no-store"
     s = json.loads(body)
     assert set(s) == {"generated_at", "run", "account", "positions", "guards", "feed",
-                      "decisions", "alerts", "locks", "road"}
+                      "decisions", "alerts", "locks", "road", "runs"}
+    assert s["runs"] == [{"run_id": "paper-test", "hypothesis": "h1"}]
     assert s["run"]["host"] == "testbox" and s["generated_at"] == T0.isoformat()
     assert "Python" not in headers["Server"]
 
@@ -111,7 +112,7 @@ def test_unserializable_state_is_500_and_recovers(server, monkeypatch):
     status, _, body = get(server, "/api/state")
     assert status == 200
     assert set(json.loads(body)) == {"generated_at", "run", "account", "positions", "guards",
-                                      "feed", "decisions", "alerts", "locks", "road"}
+                                      "feed", "decisions", "alerts", "locks", "road", "runs"}
 
 
 def test_connection_is_read_only(db_path: Path):
@@ -127,3 +128,32 @@ def test_index_has_the_panels(server):
     for marker in ("id=\"positions\"", "id=\"trail\"", "id=\"guards\"", "id=\"feed\"",
                    "id=\"locks\"", "id=\"road\"", "id=\"stale\"", "setInterval"):
         assert marker in text
+
+
+def _snapshot(db_path: Path, run_id: str) -> None:
+    from polyperps.execution.types import AccountSnapshot
+    from polyperps.storage.db import save_account_snapshot
+    conn = connect(db_path)
+    save_account_snapshot(conn, run_id, AccountSnapshot(equity=Decimal("1000"), positions=(), open_orders=(),
+                                                        stops={}, in_liquidation=False, ts=T0),
+                          start_equity=Decimal("1000"), executor="sim")
+    conn.close()
+
+
+def test_sibling_runs_are_listed_and_selectable(server, db_path: Path):
+    for run_id in ("paper-test", "paper-test-h5", "paper-test-h3", "paper-other-h3", "paper-testing"):
+        _snapshot(db_path, run_id)
+    s = json.loads(get(server, "/api/state")[2])
+    assert [r["run_id"] for r in s["runs"]] == ["paper-test", "paper-test-h3", "paper-test-h5"]
+    assert s["run"]["run_id"] == "paper-test" and s["run"]["hypothesis"] == "h1"
+    status, _, body = get(server, "/api/state?run=paper-test-h3")
+    assert status == 200
+    s = json.loads(body)
+    assert s["run"]["run_id"] == "paper-test-h3" and s["run"]["hypothesis"] == "h3"
+
+
+@pytest.mark.parametrize("run", ["paper-other-h3", "nope", "paper-testing"])
+def test_unknown_run_is_404(server, db_path: Path, run: str):
+    _snapshot(db_path, run)
+    status, _, body = get(server, f"/api/state?run={run}")
+    assert status == 404 and json.loads(body) == {"error": "unknown_run"}
