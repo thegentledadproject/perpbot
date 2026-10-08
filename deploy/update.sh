@@ -30,7 +30,7 @@ fi
 
 sudo -u polyperps .venv/bin/pip install -e . --quiet
 
-for unit in polyperps-feed.service polyperps-paper.service polyperps-dashboard.service polyperps-prune.service polyperps-prune.timer polyperps-health.service polyperps-health.timer polyperps-backfill.service polyperps-backfill.timer; do
+for unit in polyperps-feed.service polyperps-paper.service polyperps-paper@.service polyperps-dashboard.service polyperps-prune.service polyperps-prune.timer polyperps-health.service polyperps-health.timer polyperps-backfill.service polyperps-backfill.timer; do
   if ! cmp -s "deploy/${unit}" "/etc/systemd/system/${unit}"; then
     cp "deploy/${unit}" "/etc/systemd/system/${unit}"
     systemctl daemon-reload
@@ -42,9 +42,10 @@ cp deploy/needrestart-polyperps.conf /etc/needrestart/conf.d/polyperps.conf
 
 systemctl enable --now polyperps-prune.timer
 systemctl enable --now polyperps-backfill.timer
-systemctl restart polyperps-feed polyperps-paper polyperps-dashboard
+systemctl enable polyperps-paper@h3 polyperps-paper@h5   # extra BTC paper runs (h2/h4 not wired live)
+systemctl restart polyperps-feed polyperps-paper polyperps-paper@h3 polyperps-paper@h5 polyperps-dashboard
 systemctl enable --now polyperps-health.timer   # after the restart, or it pages a false unit_down
 
-systemctl --no-pager status polyperps-feed polyperps-paper polyperps-dashboard || true
+systemctl --no-pager status polyperps-feed polyperps-paper polyperps-paper@h3 polyperps-paper@h5 polyperps-dashboard || true
 
 echo "deployed commit: $(sudo -u polyperps git rev-parse --short HEAD)"

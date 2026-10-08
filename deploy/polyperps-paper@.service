@@ -1,0 +1,33 @@
+[Unit]
+Description=polyperps extra paper run, hypothesis %i (run_trader.py, SimExecutor only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=polyperps
+Group=polyperps
+WorkingDirectory=/opt/polyperps
+EnvironmentFile=/etc/polyperps/env
+# Optional per-paper overrides (e.g. POLYPERPS_INSTRUMENT_IDS=6); later files win.
+EnvironmentFile=-/etc/polyperps/paper.env
+ImportCredential=TELEGRAM_BOT_TOKEN
+ImportCredential=TELEGRAM_CHAT_ID
+# Own account per hypothesis: run id follows the main soak's, suffixed with %i.
+ExecStart=/opt/polyperps/.venv/bin/python scripts/run_trader.py --executor sim --hypothesis %i --run-id ${PAPER_RUN_ID}-%i
+Restart=always
+RestartSec=10
+RestartSteps=5
+RestartMaxDelaySec=120
+KillSignal=SIGTERM
+TimeoutStopSec=30
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/polyperps
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

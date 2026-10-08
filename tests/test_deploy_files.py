@@ -12,7 +12,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEPLOY_DIR = REPO_ROOT / "deploy"
 
-UNIT_FILES = ["polyperps-feed.service", "polyperps-paper.service", "polyperps-dashboard.service"]
+UNIT_FILES = ["polyperps-feed.service", "polyperps-paper.service", "polyperps-paper@.service", "polyperps-dashboard.service"]
 SHELL_FILES = ["bootstrap.sh", "update.sh"]
 
 # All deploy files must be plain LF text, deploy.ps1 included - PowerShell
@@ -154,3 +154,12 @@ def test_needrestart_never_restarts_polyperps_units():
     assert "$nrconf{override_rc}{qr(^polyperps-)} = 0;" in conf
     for name in ("bootstrap.sh", "update.sh"):
         assert "/etc/needrestart/conf.d/polyperps.conf" in _read(name)
+
+
+def test_extra_paper_runs_are_wired():
+    text = _read("polyperps-paper@.service")
+    assert "--executor sim --hypothesis %i --run-id ${PAPER_RUN_ID}-%i" in text
+    assert "EnvironmentFile=-/etc/polyperps/paper.env" in text
+    assert "Restart=always" in text
+    for name in ("bootstrap.sh", "update.sh"):
+        assert "polyperps-paper@h3 polyperps-paper@h5" in _read(name)
