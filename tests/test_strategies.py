@@ -9,6 +9,7 @@ from polyperps.exchange.types import SourceType
 from polyperps.strategies import GRIDS, build_strategy
 from polyperps.strategies._zscore import zscore
 from polyperps.strategies.basis import Basis
+from polyperps.strategies.carry import FundingCarry
 from polyperps.strategies.funding_reversion import FundingReversion
 from polyperps.strategies.index_lag import IndexLag
 from polyperps.strategies.lead_lag import LeadLag
@@ -76,6 +77,10 @@ def test_grids_are_pre_registered():
     assert GRIDS["h5"] == [
         {"entry_z": Decimal("2.5"), "hold_bars": 3}, {"entry_z": Decimal("2.5"), "hold_bars": 6},
         {"entry_z": Decimal("3.5"), "hold_bars": 3}, {"entry_z": Decimal("3.5"), "hold_bars": 6},
+    ]
+    assert GRIDS["h6"] == [
+        {"entry_bps_h": Decimal("0.5"), "smooth_hours": 1}, {"entry_bps_h": Decimal("0.5"), "smooth_hours": 6},
+        {"entry_bps_h": Decimal("1.0"), "smooth_hours": 1}, {"entry_bps_h": Decimal("1.0"), "smooth_hours": 6},
     ]
 
 
@@ -211,6 +216,7 @@ def test_build_strategy():
     assert build_strategy("h2", GRIDS["h2"][0], proxy_close_by_hour={}).name == "h2_basis"
     assert build_strategy("h4", GRIDS["h4"][0], proxy_close_by_hour={}).name == "h4_lead_lag"
     assert build_strategy("h5", GRIDS["h5"][0]).name == "h5_overshoot"
+    assert build_strategy("h6", GRIDS["h6"][0]).name == "h6_funding_carry"
     with pytest.raises(ValueError, match="h4 needs proxy_close_by_hour"):
         build_strategy("h4", GRIDS["h4"][0])
     with pytest.raises(ValueError):
@@ -461,3 +467,73 @@ def test_h5_ignores_a_valid_spike_when_the_current_close_is_missing():
     bars = path(calm(170) + [0.01])   # spike is the last return, at hour 171
     assert h5().target(bars) == Decimal(-1)   # sanity: it would fire on its own
     assert h5().target(bars + [nbar(172, None)]) == 0
+
+
+# --- H6: Funding carry ---
+
+
+def carry(entry="1.0", smooth=1):
+    return FundingCarry(entry_bps_h=Decimal(entry), smooth_hours=smooth)
+
+
+def fb(i, bps):
+    """Bar whose funding is `bps` basis points per hour (None = missing)."""
+    b = bar(i)
+    if bps is None:
+        from dataclasses import replace
+        return replace(b, funding_rate=None)
+    return bar(i, funding=str(Decimal(str(bps)) / 10_000))
+
+
+def test_h6_enters_the_side_that_is_paid():
+    assert carry().target([fb(0, "1.0")]) == Decimal(-1)     # positive funding: shorts are paid
+    assert carry().target([fb(0, "-1.0")]) == Decimal(1)
+    assert carry().target([fb(0, "0.99")]) == Decimal(0)
+
+
+def test_h6_exit_thresholds_are_half_entry_and_inclusive_hold():
+    s = carry()
+    assert s.target([fb(0, "1.0")]) == Decimal(-1)
+    assert s.target([fb(1, "0.5")]) == Decimal(-1)            # f == entry/2: hold
+    assert s.target([fb(2, "0.49")]) == Decimal(0)            # f < entry/2: exit
+    s = carry()
+    assert s.target([fb(0, "-1.0")]) == Decimal(1)
+    assert s.target([fb(1, "-0.5")]) == Decimal(1)
+    assert s.target([fb(2, "-0.49")]) == Decimal(0)
+
+
+def test_h6_flips_directly_on_a_sign_reversal():
+    s = carry()
+    assert s.target([fb(0, "2")]) == Decimal(-1)
+    assert s.target([fb(1, "-2")]) == Decimal(1)
+
+
+def test_h6_smooths_over_the_last_n_non_missing_values():
+    s = carry(smooth=6)
+    assert s.warmup == 6
+    hist = [fb(i, "1.2") for i in range(5)]
+    assert s.target(hist) == Decimal(0)                       # only 5 values: hold (flat)
+    hist = [fb(0, "1.2"), fb(1, None)] + [fb(i, "1.2") for i in range(2, 7)]
+    assert s.target(hist) == Decimal(-1)                      # 6 non-missing values, mean 1.2
+    hist = [fb(i, "0") for i in range(10)] + [fb(10, "6")]
+    assert s.target(hist) == Decimal(-1)                      # mean of last 6 = 1.0 -> enter
+    assert s.target(hist + [fb(11, None)]) == Decimal(-1)     # missing current bar: same window, hold
+
+
+def test_h6_on_flatten_and_on_recover():
+    s = carry()
+    s.target([fb(0, "1.0")])
+    s.on_flatten()
+    assert s.target([fb(1, "0.7")]) == Decimal(0)             # in band after a flatten: stays flat
+    s = carry()
+    s.on_recover(-1)
+    assert s.target([fb(0, "0.7")]) == Decimal(-1)            # in band after recover: keeps the short
+
+
+def test_h6_collects_funding_end_to_end():
+    bars = [fb(i, "0") for i in range(3)] + [fb(3 + j, "100") for j in range(10)]   # 1 %/h at a flat price
+    s = carry()
+    res = run_backtest(bars, s, minute_closes=minutes(bars), taker_fee_rate=Decimal("0.0005"), warmup=s.warmup)
+    fills = [r for r in res.ledger if r.kind == "fill"]
+    assert fills and fills[0].position == Decimal(-1)
+    assert res.equity[-1][1] > Decimal("3")

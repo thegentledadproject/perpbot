@@ -11,6 +11,7 @@ from decimal import Decimal
 
 from polyperps.backtest.strategy import Strategy
 from polyperps.strategies.basis import Basis
+from polyperps.strategies.carry import FundingCarry
 from polyperps.strategies.funding_reversion import FundingReversion
 from polyperps.strategies.index_lag import IndexLag
 from polyperps.strategies.lead_lag import LeadLag
@@ -42,6 +43,11 @@ GRIDS: dict[str, list[dict]] = {
         for ez in (Decimal("2.5"), Decimal("3.5"))
         for hb in (3, 6)
     ],
+    "h6": [
+        {"entry_bps_h": eb, "smooth_hours": sh}
+        for eb in (Decimal("0.5"), Decimal("1.0"))
+        for sh in (1, 6)
+    ],
 }
 
 
@@ -65,4 +71,6 @@ def build_strategy(
         return LeadLag(**params, proxy_close_by_hour=proxy_close_by_hour)
     if hypothesis == "h5":
         return Overshoot(**params)
+    if hypothesis == "h6":
+        return FundingCarry(**params)
     raise ValueError(f"unknown hypothesis {hypothesis!r}")

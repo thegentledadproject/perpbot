@@ -1,6 +1,6 @@
 # H6 funding carry on high-funding perps: pre-registered hypothesis
 
-Date: 2026-10-11. Status: **DRAFT, awaiting user review**. Amends
+Date: 2026-10-11. Status: **APPROVED 2026-10-11** (plan docs/superpowers/plans/2026-10-11-h6-funding-carry.md). Amends
 `docs/superpowers/specs/2026-09-11-polyperps-phase1-design.md` §6 (one new grid row).
 
 **Pre-registration.** Before this spec was written, nobody had looked at any backtest, P&L or holdout
