@@ -288,8 +288,8 @@ plink -batch -load polyperps-ec2 "cat /var/lib/polyperps/h6-2026-10-11.jsonl"
   4. Push, then `gh pr create`, then `gh pr merge --merge --delete-branch`, then `git checkout master && git pull`.
 
 - [ ] **Step 5: Apply the approval rule and record it.**
-  - **Approved:** `passed` on 2 or more instruments.
-  - **Closed:** fewer than 2 pass, *and* every instrument had at least 60 tested days.
-  - **Pending:** fewer than 2 pass, and some instruments had under 60 tested days. Those instruments get exactly one re-run when they reach 60. Note the date in memory.
+  - **Approved:** `passed` on 2 or more instruments that each had at least 60 tested days.
+  - **Closed:** fewer than 2 qualifying passes, *and* every instrument had at least 60 tested days.
+  - **Pending:** fewer than 2 qualifying passes, and at least one instrument had under 60 tested days. Those instruments get exactly one re-run when they reach 60. Note the date in memory.
 
   Append a dated paragraph to `C:\Users\user\.claude\projects\C--Users-user-Downloads-perpbot\memory\polyperps-open-items.md` with the numbers and the verdict. Remove the scratch clone with `sudo -u polyperps rm -rf /var/lib/polyperps/h6-src`.

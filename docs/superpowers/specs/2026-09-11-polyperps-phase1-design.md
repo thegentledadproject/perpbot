@@ -133,8 +133,9 @@ Grids are fixed lists, not ranges. Every grid point is a trial; selection is by 
 | H3 mark-vs-index lag | `strategies/index_lag.py` | `premium_bps = (close / index_close − 1) × 1e4`; if `abs(premium_bps) ≥ entry_bps` take the position that closes the premium; hold `hold_bars` bars then flat; returns `0` when `index_close` is None (proxy) | `entry_bps ∈ {10, 25}`, `hold_bars ∈ {1, 3}` |
 | H4 lead-lag (added 2026-10-03) | `strategies/lead_lag.py` | follow a one-hour Hyperliquid move Polymarket has not matched; rules in `2026-10-03-h4-h5-price-lag-design.md` §2.1 | `gap_bps ∈ {25, 50}`, `hold_bars ∈ {1, 3}` |
 | H5 overshoot (added 2026-10-03) | `strategies/overshoot.py` | fade a one-hour Polymarket move with `abs(z) ≥ entry_z` over 168 returns and `abs(r) ≥ 30 bps`; rules in `2026-10-03-h4-h5-price-lag-design.md` §2.2 | `entry_z ∈ {2.5, 3.5}`, `hold_bars ∈ {3, 6}` |
+| H6 funding carry (added 2026-10-11) | `strategies/carry.py` | short when smoothed funding `≥ entry_bps_h`, long when `≤ −entry_bps_h`, exit inside half the threshold; rules in `2026-10-11-h6-funding-carry-design.md` §2 | `entry_bps_h ∈ {0.5, 1.0}`, `smooth_hours ∈ {1, 6}` |
 
-Warm-up = the strategy's `lookback` (H1/H2), 1 (H3), 2 (H4) or 169 (H5); bars inside warm-up are not traded.
+Warm-up = the strategy's `lookback` (H1/H2), 1 (H3), 2 (H4) 169 (H5) or `smooth_hours` (H6); bars inside warm-up are not traded.
 
 ## 7. Sufficiency bar (spec 1.0) — pre-registered, code-enforced
 

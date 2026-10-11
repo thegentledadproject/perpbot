@@ -52,6 +52,8 @@ The decision is taken at the close of `history[-1]`.
 Let `f` be the mean of the last `smooth_hours` non-missing `Bar.funding_rate` values in `history`, in
 bps/h (rate × 10 000). If there are fewer than `smooth_hours` such values, hold the current position.
 
+The enter rules are checked first, then the exit rules.
+
 - **Enter / stay:** if `f ≥ entry_bps_h`, the target is −1 (short; positive funding is paid by longs to
   shorts). If `f ≤ −entry_bps_h`, the target is +1.
 - **Exit:**
@@ -59,7 +61,8 @@ bps/h (rate × 10 000). If there are fewer than `smooth_hours` such values, hold
   - If short and `f < entry_bps_h / 2`, the target is 0.
   - This covers a sign flip too.
 - **Hold:** otherwise keep the current position. The rule can flip directly from −1 to +1 when `f`
-  crosses both thresholds in one bar. The harness handles the flip as it does for H1.
+  crosses both thresholds in one bar. The harness handles the flip as it does for H1
+  (the harness exits on that bar; re-entry is the next bar's decision, exactly as for H1).
 
 All existing harness rules apply unchanged:
 - funding is paid at bar close (harness rule 2);
@@ -109,7 +112,7 @@ validation log.
 ## 5. Approval rule
 
 H6 is approved only if `passed` is True (current harness rules, including amendments 8.3/8.4) on **at
-least 2 of the 3** instruments.
+least 2 of the 3** instruments. Only records with at least 60 tested days count toward approval; a run under 60 tested days is never judged, and each such instrument gets exactly one re-run once it reaches 60 days (§4.5).
 
 - **Approved:** paper-trade H6 on the passing instruments for 2 weeks. No real money until a later,
   separate decision.
